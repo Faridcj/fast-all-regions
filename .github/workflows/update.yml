@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -21,13 +22,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Generate playlist
-        run: python scripts/merge_playlists.py
+      - name: Build playlist
+        run: |
+          python scripts/merge_playlists.py
 
-      - name: Commit playlist
+      - name: Commit updated playlist
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add fast-all-regions.m3u
-          git diff --cached --quiet || git commit -m "Update FAST all-regions playlist"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No playlist changes."
+          else
+            git commit -m "Update FAST all-regions playlist"
+            git push
+          fi
