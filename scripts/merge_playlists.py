@@ -1,7 +1,7 @@
 import json
 import re
 import urllib.request
-from urllib.parse import urlsplit
+from pathlib import PurePosixPath
 
 OWNER = "BuddyChewChew"
 
@@ -9,18 +9,15 @@ REPOS = [
     "app-m3u-generator",
     "pluto",
     "plex",
-    "plex-alt-fast-channels",
-    "samsungtvplus",
     "roku-playlist-generator",
+    "samsungtvplus",
     "tubi-scraper",
     "xumo-playlist-generator",
     "localnow-playlist-generator",
     "lg-playlist-generator",
-    "lg-playlist-generator2",
     "tcl-playlist-generator",
     "distro-playlist-generator",
     "RakutenTV",
-    "airy-playlist-generator",
 ]
 
 OUTPUT = "fast-all-regions.m3u"
@@ -30,43 +27,230 @@ HEADERS = {
     "Accept": "application/vnd.github+json",
 }
 
+# Common country / region names
+COUNTRIES = {
+    "us": "US",
+    "usa": "US",
+    "united-states": "US",
+    "united_states": "US",
+    "america": "US",
+
+    "uk": "UK",
+    "gb": "UK",
+    "england": "UK",
+    "united-kingdom": "UK",
+    "united_kingdom": "UK",
+
+    "ca": "Canada",
+    "canada": "Canada",
+
+    "au": "Australia",
+    "australia": "Australia",
+
+    "de": "Germany",
+    "germany": "Germany",
+
+    "fr": "France",
+    "france": "France",
+
+    "es": "Spain",
+    "spain": "Spain",
+
+    "it": "Italy",
+    "italy": "Italy",
+
+    "br": "Brazil",
+    "brazil": "Brazil",
+
+    "mx": "Mexico",
+    "mexico": "Mexico",
+
+    "in": "India",
+    "india": "India",
+
+    "jp": "Japan",
+    "japan": "Japan",
+
+    "kr": "South Korea",
+    "korea": "South Korea",
+
+    "nz": "New Zealand",
+    "new-zealand": "New Zealand",
+    "new_zealand": "New Zealand",
+
+    "ie": "Ireland",
+    "ireland": "Ireland",
+
+    "se": "Sweden",
+    "sweden": "Sweden",
+
+    "no": "Norway",
+    "norway": "Norway",
+
+    "dk": "Denmark",
+    "denmark": "Denmark",
+
+    "nl": "Netherlands",
+    "netherlands": "Netherlands",
+
+    "at": "Austria",
+    "austria": "Austria",
+
+    "ch": "Switzerland",
+    "switzerland": "Switzerland",
+
+    "pl": "Poland",
+    "poland": "Poland",
+
+    "tr": "Turkey",
+    "turkey": "Turkey",
+
+    "za": "South Africa",
+    "south-africa": "South Africa",
+    "south_africa": "South Africa",
+}
+
+
 def get(url):
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.read()
+
+    with urllib.request.urlopen(req, timeout=60) as response:
+        return response.read()
+
 
 def github_json(url):
     return json.loads(get(url).decode("utf-8"))
 
+
 def get_tree(repo):
-    url = f"https://api.github.com/repos/{OWNER}/{repo}/git/trees/main?recursive=1"
+    url = (
+        f"https://api.github.com/repos/"
+        f"{OWNER}/{repo}/git/trees/main?recursive=1"
+    )
+
     try:
         data = github_json(url)
         return data.get("tree", [])
+
     except Exception as e:
         print(f"[WARN] {repo}: {e}")
         return []
 
+
+def detect_country(path):
+    """
+    Try to identify country/region from playlist path.
+    """
+
+    parts = PurePosixPath(path.lower()).parts
+
+    for part in parts:
+        cleaned = (
+            part.replace(".m3u8", "")
+                .replace(".m3u", "")
+                .replace(".json", "")
+                .replace(".txt", "")
+        )
+
+        if cleaned in COUNTRIES:
+            return COUNTRIES[cleaned]
+
+        # Match names such as us-east / us_channels
+        first = re.split(r"[-_. ]", cleaned)[0]
+
+        if first in COUNTRIES:
+            return COUNTRIES[first]
+
+    return "Global"
+
+
+def extract_group(extinf):
+    """
+    Extract existing group-title.
+    """
+
+    match = re.search(
+        r'group-title="([^"]*)"',
+        extinf,
+        flags=re.IGNORECASE
+    )
+
+    if match:
+        return match.group(1).strip()
+
+    return "General"
+
+
+def replace_group(extinf, group):
+    """
+    Replace or add group-title.
+    """
+
+    if re.search(r'group-title="[^"]*"', extinf, re.IGNORECASE):
+
+        return re.sub(
+            r'group-title="[^"]*"',
+            f'group-title="{group}"',
+            extinf,
+            flags=re.IGNORECASE
+        )
+
+    # Insert group-title after EXTINF attributes.
+    comma = extinf.find(",")
+
+    if comma == -1:
+        return extinf
+
+    prefix = extinf[:comma]
+    name = extinf[comma:]
+
+    return f'{prefix} group-title="{group}"{name}'
+
+
+def service_name(repo):
+    """
+    Convert repository name into a clean service name.
+    """
+
+    names = {
+        "app-m3u-generator": "FAST Apps",
+        "pluto": "Pluto TV",
+        "plex": "Plex",
+        "roku-playlist-generator": "Roku",
+        "samsungtvplus": "Samsung TV Plus",
+        "tubi-scraper": "Tubi",
+        "xumo-playlist-generator": "Xumo",
+        "localnow-playlist-generator": "Local Now",
+        "lg-playlist-generator": "LG Channels",
+        "tcl-playlist-generator": "TCL TV+",
+        "distro-playlist-generator": "Distro",
+        "RakutenTV": "Rakuten TV",
+    }
+
+    return names.get(repo, repo)
+
+
 def normalize_url(url):
-    url = url.strip()
-    if not url:
-        return ""
+    return (
+        url.strip()
+        .strip('"')
+        .strip("'")
+    )
 
-    # Remove accidental quotes
-    url = url.strip('"').strip("'")
 
-    # Normalize whitespace
-    url = re.sub(r"\s+", "", url)
-
-    return url
-
-def parse_m3u(text, source):
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+def parse_m3u(text):
+    lines = (
+        text.replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .split("\n")
+    )
 
     entries = []
+
     current_info = None
 
     for line in lines:
+
         line = line.strip()
 
         if not line:
@@ -79,63 +263,74 @@ def parse_m3u(text, source):
             continue
 
         elif current_info:
+
             url = normalize_url(line)
 
             if url.startswith(("http://", "https://")):
-                entries.append((current_info, url, source))
+                entries.append(
+                    (current_info, url)
+                )
 
             current_info = None
 
     return entries
 
-def download_playlist(url, source):
+
+def download_playlist(url):
     try:
+
         raw = get(url)
-        text = raw.decode("utf-8", errors="replace")
+
+        text = raw.decode(
+            "utf-8",
+            errors="replace"
+        )
 
         if "#EXTINF:" not in text:
             return []
 
-        return parse_m3u(text, source)
+        return parse_m3u(text)
 
     except Exception as e:
-        print(f"[WARN] Failed {url}: {e}")
-        return []
 
-def clean_extinf(extinf, source):
-    # Preserve metadata but add source to group if useful.
-    if 'group-title="' in extinf:
-        extinf = re.sub(
-            r'group-title="([^"]*)"',
-            lambda m: f'group-title="{m.group(1)}"',
-            extinf,
-            count=1,
+        print(
+            f"[WARN] Failed playlist: "
+            f"{url} -> {e}"
         )
 
-    return extinf
+        return []
+
 
 def main():
+
     all_entries = []
 
     for repo in REPOS:
-        print(f"\n=== {repo} ===")
+
+        print()
+        print("=" * 60)
+        print(service_name(repo))
+        print("=" * 60)
 
         tree = get_tree(repo)
 
-        m3u_files = [
-            x["path"]
-            for x in tree
-            if x.get("type") == "blob"
-            and x["path"].lower().endswith((".m3u", ".m3u8"))
+        playlist_files = [
+            item["path"]
+            for item in tree
+            if item.get("type") == "blob"
+            and item["path"].lower().endswith(
+                (".m3u", ".m3u8")
+            )
         ]
 
-        print(f"Found {len(m3u_files)} playlist files")
+        print(
+            f"Playlist files found: "
+            f"{len(playlist_files)}"
+        )
 
-        for path in m3u_files:
-            # Avoid EPG/XML or obvious non-live files.
-            lower = path.lower()
+        for path in playlist_files:
 
-            if "epg" in lower:
+            if "epg" in path.lower():
                 continue
 
             url = (
@@ -143,46 +338,144 @@ def main():
                 f"{OWNER}/{repo}/main/{path}"
             )
 
-            entries = download_playlist(url, f"{repo}/{path}")
-            print(f"  {path}: {len(entries)} channels")
+            entries = download_playlist(url)
 
-            all_entries.extend(entries)
+            print(
+                f"{path}: "
+                f"{len(entries)} channels"
+            )
 
-    # Deduplicate by actual stream URL.
-    # This removes the same stream appearing in multiple regions/services.
-    seen_urls = set()
+            country = detect_country(path)
+            service = service_name(repo)
+
+            for extinf, stream_url in entries:
+
+                original_group = extract_group(
+                    extinf
+                )
+
+                # Build hierarchical group:
+                #
+                # Service | Country | Genre
+                #
+                # Example:
+                # Pluto TV | US | News
+
+                group = (
+                    f"{service} | "
+                    f"{country} | "
+                    f"{original_group}"
+                )
+
+                new_extinf = replace_group(
+                    extinf,
+                    group
+                )
+
+                all_entries.append(
+                    (
+                        new_extinf,
+                        stream_url,
+                        service,
+                        country,
+                        original_group,
+                    )
+                )
+
+    # -------------------------------------------------
+    # Remove duplicate streams
+    # -------------------------------------------------
+
+    seen = set()
     unique = []
 
-    for extinf, url, source in all_entries:
+    for entry in all_entries:
+
+        extinf = entry[0]
+        url = entry[1]
+
         key = url.lower()
 
-        if key in seen_urls:
+        if key in seen:
             continue
 
-        seen_urls.add(key)
-        unique.append((extinf, url, source))
+        seen.add(key)
+        unique.append(entry)
 
-    # Stable ordering: source first, then channel name.
-    def channel_name(extinf):
-        if "," in extinf:
-            return extinf.split(",", 1)[1].strip().lower()
-        return extinf.lower()
+    # -------------------------------------------------
+    # Sort
+    # -------------------------------------------------
 
-    unique.sort(key=lambda x: (x[2].lower(), channel_name(x[0])))
+    def sort_key(entry):
 
-    with open(OUTPUT, "w", encoding="utf-8", newline="\n") as f:
-        f.write("#EXTM3U\n")
+        extinf, url, service, country, genre = entry
 
-        for extinf, url, source in unique:
+        channel = (
+            extinf.split(",", 1)[1]
+            if "," in extinf
+            else extinf
+        )
+
+        return (
+            service.lower(),
+            country.lower(),
+            genre.lower(),
+            channel.lower(),
+        )
+
+    unique.sort(key=sort_key)
+
+    # -------------------------------------------------
+    # Write final M3U
+    # -------------------------------------------------
+
+    with open(
+        OUTPUT,
+        "w",
+        encoding="utf-8",
+        newline="\n"
+    ) as f:
+
+        f.write(
+            "#EXTM3U "
+            'x-tvg-url=""\n'
+        )
+
+        for (
+            extinf,
+            url,
+            service,
+            country,
+            genre
+        ) in unique:
+
             f.write(extinf + "\n")
             f.write(url + "\n")
 
-    print("\n======================================")
-    print(f"Total discovered entries : {len(all_entries)}")
-    print(f"Unique streams            : {len(unique)}")
-    print(f"Removed duplicates        : {len(all_entries) - len(unique)}")
-    print(f"Output                    : {OUTPUT}")
-    print("======================================")
+    print()
+    print("=" * 60)
+    print("DONE")
+    print("=" * 60)
+
+    print(
+        f"Total collected : "
+        f"{len(all_entries)}"
+    )
+
+    print(
+        f"Unique channels : "
+        f"{len(unique)}"
+    )
+
+    print(
+        f"Duplicates removed : "
+        f"{len(all_entries) - len(unique)}"
+    )
+
+    print(
+        f"Output : {OUTPUT}"
+    )
+
 
 if __name__ == "__main__":
     main()
