@@ -281,16 +281,17 @@ def get_all_repositories():
     return repositories
 
 
-def get_repository_tree(repo, branch):
+# ============================================================
+# GITHUB TREE
+# ============================================================
 
-    # IMPORTANT:
-    # Keep "/" unescaped inside branch/path values.
+def get_repository_tree(repo, branch):
 
     url = (
         f"https://api.github.com/repos/"
         f"{OWNER}/{quote(repo, safe='')}"
         f"/git/trees/"
-        f"{quote(branch, safe='/')}"
+        f"{quote(branch, safe='')}"
         f"?recursive=1"
     )
 
@@ -368,9 +369,66 @@ def discover_playlists(repo, branch):
         if not is_playlist(path):
             continue
 
-        result.append(path)
+        result.append(
+            {
+                "path": path,
+                "sha": item.get("sha"),
+                "size": item.get("size", 0),
+            }
+        )
 
-    return sorted(result)
+    return sorted(
+        result,
+        key=lambda x: x["path"].lower()
+    )
+
+
+# ============================================================
+# READ GITHUB BLOB
+# ============================================================
+
+def fetch_github_blob(repo, sha):
+
+    if not sha:
+        raise RuntimeError(
+            "Missing blob SHA"
+        )
+
+    url = (
+        f"https://api.github.com/repos/"
+        f"{OWNER}/"
+        f"{quote(repo, safe='')}/"
+        f"git/blobs/"
+        f"{quote(sha, safe='')}"
+    )
+
+    data = github_json(url)
+
+    content = data.get(
+        "content",
+        ""
+    )
+
+    encoding = data.get(
+        "encoding",
+        ""
+    )
+
+    if encoding != "base64":
+        raise RuntimeError(
+            f"Unsupported blob encoding: {encoding}"
+        )
+
+    import base64
+
+    raw = base64.b64decode(
+        content
+    )
+
+    return raw.decode(
+        "utf-8",
+        errors="replace"
+    )
 
 
 # ============================================================
@@ -586,7 +644,7 @@ def detect_country(
         if country:
             return country
 
-    # 3. Existing group title
+    # 3. Original group
 
     original_group = get_attribute(
         extinf,
@@ -699,7 +757,6 @@ def parse_m3u(text):
         ):
 
             current_extinf = line
-
             continue
 
         if line.startswith("#"):
@@ -781,6 +838,48 @@ def get_previous_service(extinf):
 
 
 # ============================================================
+# SAFE OUTPUT
+# ============================================================
+
+def write_output(entries):
+
+    temp_output = (
+        OUTPUT
+        + ".tmp"
+    )
+
+    with open(
+        temp_output,
+        "w",
+        encoding="utf-8",
+        newline="\n"
+    ) as file:
+
+        file.write(
+            "#EXTM3U\n"
+        )
+
+        for entry in entries:
+
+            file.write(
+                entry["extinf"]
+                + "\n"
+            )
+
+            file.write(
+                entry["url"]
+                + "\n"
+            )
+
+    import os
+
+    os.replace(
+        temp_output,
+        OUTPUT
+    )
+
+
+# ============================================================
 # BUILD
 # ============================================================
 
@@ -843,7 +942,7 @@ def main():
             f"=== {repo} ==="
         )
 
-        playlist_paths = (
+        playlist_files = (
             discover_playlists(
                 repo,
                 branch
@@ -852,11 +951,11 @@ def main():
 
         print(
             f"Found "
-            f"{len(playlist_paths)} "
+            f"{len(playlist_files)} "
             f"playlist files"
         )
 
-        if not playlist_paths:
+        if not playlist_files:
 
             repository_stats[
                 repo
@@ -875,23 +974,16 @@ def main():
         successful_files = 0
         repo_channels = 0
 
-        for path in playlist_paths:
+        for playlist in playlist_files:
 
-            # IMPORTANT:
-            # safe="/" prevents the path slash from
-            # becoming %2F.
-
-            raw_url = (
-                "https://raw.githubusercontent.com/"
-                f"{OWNER}/"
-                f"{quote(repo, safe='')}/"
-                f"{quote(path, safe='/')}"
-            )
+            path = playlist["path"]
+            sha = playlist["sha"]
 
             try:
 
-                text = fetch_text(
-                    raw_url
+                text = fetch_github_blob(
+                    repo,
+                    sha
                 )
 
                 entries = parse_m3u(
@@ -928,15 +1020,6 @@ def main():
                             extinf
                         )
                     )
-
-                    # =================================================
-                    # DYNAMIC GROUP
-                    #
-                    # SERVICE | COUNTRY | ORIGINAL SOURCE GROUP
-                    #
-                    # If Buddy changes the original group-title,
-                    # the next run automatically picks it up.
-                    # =================================================
 
                     final_group = (
                         f"{service} | "
@@ -988,7 +1071,7 @@ def main():
             repo
         ] = {
             "files": len(
-                playlist_paths
+                playlist_files
             ),
             "successful": successful_files,
             "channels": repo_channels,
@@ -999,7 +1082,7 @@ def main():
         # ========================================================
 
         if (
-            len(playlist_paths) > 0
+            len(playlist_files) > 0
             and successful_files == 0
         ):
 
@@ -1087,7 +1170,6 @@ def main():
         if dedup_key in seen:
 
             duplicate_count += 1
-
             continue
 
         seen.add(
@@ -1120,31 +1202,42 @@ def main():
     )
 
     # ========================================================
+    # FINAL SAFETY CHECK
+    # ========================================================
+
+    if len(unique_entries) == 0:
+
+        print()
+        print("=" * 70)
+        print("BUILD ABORTED")
+        print("=" * 70)
+
+        print(
+            "No channels were discovered."
+        )
+
+        print(
+            "Existing output was NOT overwritten."
+        )
+
+        print(
+            f"Output preserved: {OUTPUT}"
+        )
+
+        print(
+            f"Failed files: "
+            f"{len(failed_files)}"
+        )
+
+        return
+
+    # ========================================================
     # WRITE OUTPUT
     # ========================================================
 
-    with open(
-        OUTPUT,
-        "w",
-        encoding="utf-8",
-        newline="\n"
-    ) as file:
-
-        file.write(
-            "#EXTM3U\n"
-        )
-
-        for entry in unique_entries:
-
-            file.write(
-                entry["extinf"]
-                + "\n"
-            )
-
-            file.write(
-                entry["url"]
-                + "\n"
-            )
+    write_output(
+        unique_entries
+    )
 
     # ========================================================
     # FINAL REPORT
