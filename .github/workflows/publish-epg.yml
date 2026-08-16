@@ -1,0 +1,110 @@
+name: Publish EPG
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find latest EPG run
+        id: run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+
+          RUN_ID=$(gh run list \
+            --repo "${{ github.repository }}" \
+            --workflow "epg-audit.yml" \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "ERROR: No successful EPG run found"
+            exit 1
+          fi
+
+          echo "RUN_ID=$RUN_ID"
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+
+      - name: Download EPG artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+
+          mkdir -p epg_download
+
+          gh run download \
+            "${{ steps.run.outputs.run_id }}" \
+            --repo "${{ github.repository }}" \
+            --name epg-xml \
+            --dir epg_download
+
+          echo "Downloaded files:"
+
+          find epg_download -type f -ls
+
+
+      - name: Install EPG
+        run: |
+
+          EPG_FILE=$(find epg_download \
+            -type f \
+            -name "*.xml" \
+            | head -n 1)
+
+          if [ -z "$EPG_FILE" ]; then
+            echo "ERROR: XML file not found"
+            exit 1
+          fi
+
+          echo "Using:"
+          echo "$EPG_FILE"
+
+          mkdir -p public
+
+          cp "$EPG_FILE" public/epg.xml
+
+          echo ""
+          echo "Published file:"
+          ls -lh public/epg.xml
+
+
+      - name: Commit EPG
+        run: |
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add public/epg.xml
+
+          git status
+
+          if git diff --cached --quiet; then
+
+            echo "No changes."
+
+          else
+
+            git commit \
+              -m "Publish EPG"
+
+            git push
+
+          fi
