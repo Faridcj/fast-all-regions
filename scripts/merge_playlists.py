@@ -4,13 +4,10 @@ import json
 import re
 import sys
 import time
-import socket
 import urllib.error
 import urllib.parse
 import urllib.request
-
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
@@ -18,14 +15,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ============================================================
 
 OWNER = "BuddyChewChew"
-
 OUTPUT_FILE = "fast-all-regions.m3u"
 
 GITHUB_API = "https://api.github.com"
 
 USER_AGENT = (
     "Mozilla/5.0 "
-    "(compatible; FAST-All-Regions-Builder/2.0)"
+    "(compatible; FAST-All-Regions-Builder/1.0)"
 )
 
 PLAYLIST_EXTENSIONS = (
@@ -33,41 +29,13 @@ PLAYLIST_EXTENSIONS = (
     ".m3u8",
 )
 
-# ------------------------------------------------------------
-# Health check configuration
-# ------------------------------------------------------------
-
-HEALTH_CHECK_ENABLED = True
-
-HEALTH_CHECK_WORKERS = 24
-
-HEALTH_CHECK_TIMEOUT = 12
-
-HEALTH_CHECK_RETRIES = 1
-
-HEALTH_CHECK_BYTES = 16384
-
-# ------------------------------------------------------------
-# Source priority
-#
-# LOWER NUMBER = HIGHER PRIORITY
-# ------------------------------------------------------------
-
-SOURCE_PRIORITY = {
-    "app-m3u-generator": 1,
-
-    "My-Streams": 2,
-
-    "buddylive": 3,
-    "buddylive-combined": 3,
-    "buddylive_v2": 3,
-}
-
-DEFAULT_SOURCE_PRIORITY = 100
-
 
 # ============================================================
 # SPECIAL CATEGORY SOURCES
+#
+# These repositories are forced into ONE category.
+#
+# Their original group-title is NEVER used.
 # ============================================================
 
 SPECIAL_GROUPS = {
@@ -162,22 +130,61 @@ SOURCE_NAME_MAP = {
 
 
 # ============================================================
+# LOW-PRIORITY GROUPS
+#
+# IMPORTANT:
+#
+# ALL OTHER SOURCES HAVE HIGHER PRIORITY THAN THESE.
+#
+# Priority from LOWEST to HIGHEST:
+#
+#   App M3U
+#   My-Streams
+#   Buddy Live
+#   ALL OTHER SOURCES
+#
+# Therefore:
+#
+# App M3U + Samsung TV Plus
+# -> App M3U duplicate removed
+# -> Samsung TV Plus kept
+#
+# My-Streams + TCL
+# -> My-Streams duplicate removed
+# -> TCL kept
+#
+# Buddy Live + Plex
+# -> Buddy Live duplicate removed
+# -> Plex kept
+#
+# Plex + Samsung TV Plus
+# -> BOTH KEPT
+#
+# TCL + Plex
+# -> BOTH KEPT
+# ============================================================
+
+LOW_PRIORITY_GROUPS = {
+    "App M3U": 1,
+    "My-Streams": 2,
+    "Buddy Live": 3,
+}
+
+
+# ============================================================
 # HTTP HELPERS
 # ============================================================
 
-def http_get(url, timeout=45, retries=3, headers=None):
+def http_get(url, timeout=45, retries=3):
 
-    request_headers = {
+    headers = {
         "User-Agent": USER_AGENT,
         "Accept": "*/*",
     }
 
-    if headers:
-        request_headers.update(headers)
-
     request = urllib.request.Request(
         url,
-        headers=request_headers
+        headers=headers
     )
 
     last_error = None
@@ -208,8 +215,7 @@ def http_get(url, timeout=45, retries=3, headers=None):
 
         except (
             urllib.error.URLError,
-            TimeoutError,
-            socket.timeout
+            TimeoutError
         ) as exc:
 
             last_error = exc
@@ -251,6 +257,28 @@ def github_api(path, retries=3):
         headers=headers
     )
 
+    # --------------------------------------------------------
+    # GitHub Actions GITHUB_TOKEN
+    # --------------------------------------------------------
+
+    github_token = None
+
+    try:
+        github_token = (
+            __import__("os")
+            .environ
+            .get("GITHUB_TOKEN")
+        )
+    except Exception:
+        pass
+
+    if github_token:
+
+        request.add_header(
+            "Authorization",
+            f"Bearer {github_token}"
+        )
+
     last_error = None
 
     for attempt in range(retries):
@@ -261,6 +289,17 @@ def github_api(path, retries=3):
                 request,
                 timeout=45
             ) as response:
+
+                remaining = response.headers.get(
+                    "X-RateLimit-Remaining"
+                )
+
+                if remaining is not None:
+
+                    print(
+                        f"  GitHub API remaining: "
+                        f"{remaining}"
+                    )
 
                 return json.loads(
                     response.read().decode(
@@ -302,8 +341,7 @@ def github_api(path, retries=3):
 
         except (
             urllib.error.URLError,
-            TimeoutError,
-            socket.timeout
+            TimeoutError
         ) as exc:
 
             last_error = exc
@@ -374,11 +412,11 @@ def get_final_group(
     original_group
 ):
 
-    # --------------------------------------------------------
-    # SPECIAL SOURCES
+    # ========================================================
+    # SPECIAL SOURCE OVERRIDE
     #
-    # ORIGINAL group-title IS COMPLETELY IGNORED.
-    # --------------------------------------------------------
+    # NEVER inspect original group-title.
+    # ========================================================
 
     if repo_name in SPECIAL_GROUPS:
 
@@ -386,9 +424,9 @@ def get_final_group(
             repo_name
         ]
 
-    # --------------------------------------------------------
+    # ========================================================
     # NORMAL SOURCES
-    # --------------------------------------------------------
+    # ========================================================
 
     source = SOURCE_NAME_MAP.get(
         repo_name,
@@ -471,6 +509,10 @@ def parse_m3u(text):
         if not line:
             continue
 
+        # ----------------------------------------------------
+        # EXTINF
+        # ----------------------------------------------------
+
         if line.startswith("#EXTINF"):
 
             attributes, name = parse_extinf(
@@ -484,9 +526,17 @@ def parse_m3u(text):
 
             continue
 
+        # ----------------------------------------------------
+        # Other M3U directives
+        # ----------------------------------------------------
+
         if line.startswith("#"):
 
             continue
+
+        # ----------------------------------------------------
+        # STREAM URL
+        # ----------------------------------------------------
 
         if waiting_for_url:
 
@@ -550,6 +600,7 @@ def discover_repositories():
             name = repo.get("name")
 
             if name:
+
                 repositories.append(
                     name
                 )
@@ -660,798 +711,6 @@ def raw_url(
 
 
 # ============================================================
-# SOURCE PRIORITY
-# ============================================================
-
-def get_source_priority(repo_name):
-
-    return SOURCE_PRIORITY.get(
-        repo_name,
-        DEFAULT_SOURCE_PRIORITY
-    )
-
-
-# ============================================================
-# CHANNEL IDENTITY
-# ============================================================
-
-def normalize_identity(value):
-
-    if not value:
-        return ""
-
-    value = value.lower().strip()
-
-    # Remove common punctuation
-    value = re.sub(
-        r"[\[\]\(\)\{\}:,._\-]+",
-        " ",
-        value
-    )
-
-    # Collapse whitespace
-    value = re.sub(
-        r"\s+",
-        " ",
-        value
-    )
-
-    return value.strip()
-
-
-def get_channel_identity(entry):
-
-    attrs = entry.get(
-        "attrs",
-        {}
-    )
-
-    # --------------------------------------------------------
-    # Strongest identity: tvg-id
-    # --------------------------------------------------------
-
-    tvg_id = normalize_identity(
-        attrs.get(
-            "tvg-id",
-            ""
-        )
-    )
-
-    if tvg_id:
-
-        return (
-            "tvg-id:",
-            tvg_id
-        )
-
-    # --------------------------------------------------------
-    # Second: tvg-name
-    # --------------------------------------------------------
-
-    tvg_name = normalize_identity(
-        attrs.get(
-            "tvg-name",
-            ""
-        )
-    )
-
-    if tvg_name:
-
-        return (
-            "tvg-name:",
-            tvg_name
-        )
-
-    # --------------------------------------------------------
-    # Third: displayed channel name
-    # --------------------------------------------------------
-
-    channel_name = normalize_identity(
-        entry.get(
-            "name",
-            ""
-        )
-    )
-
-    if channel_name:
-
-        return (
-            "name:",
-            channel_name
-        )
-
-    # --------------------------------------------------------
-    # No reliable identity
-    # --------------------------------------------------------
-
-    return (
-        "url:",
-        entry.get(
-            "url",
-            ""
-        ).strip()
-    )
-
-
-# ============================================================
-# PLAYBACK URL HEADERS
-# ============================================================
-
-def get_stream_headers(entry):
-
-    attrs = entry.get(
-        "attrs",
-        {}
-    )
-
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": (
-            "application/vnd.apple.mpegurl,"
-            "application/x-mpegURL,"
-            "video/mp2t,"
-            "*/*"
-        ),
-    }
-
-    # --------------------------------------------------------
-    # M3U commonly-used HTTP header attributes
-    # --------------------------------------------------------
-
-    user_agent = (
-        attrs.get("http-user-agent")
-        or attrs.get("user-agent")
-        or attrs.get("http_ua")
-    )
-
-    if user_agent:
-
-        headers["User-Agent"] = user_agent
-
-    referrer = (
-        attrs.get("http-referrer")
-        or attrs.get("http-referrer")
-        or attrs.get("referrer")
-    )
-
-    if referrer:
-
-        headers["Referer"] = referrer
-
-    return headers
-
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
-def is_hls_content(
-    data,
-    content_type=""
-):
-
-    sample = data[:HEALTH_CHECK_BYTES]
-
-    text = sample.decode(
-        "utf-8",
-        errors="ignore"
-    )
-
-    if "#EXTM3U" in text:
-
-        return True
-
-    content_type = (
-        content_type or ""
-    ).lower()
-
-    if (
-        "mpegurl" in content_type
-        or "vnd.apple.mpegurl" in content_type
-    ):
-
-        return True
-
-    return False
-
-
-def check_dns(hostname):
-
-    try:
-
-        socket.getaddrinfo(
-            hostname,
-            None,
-            type=socket.SOCK_STREAM
-        )
-
-        return True, ""
-
-    except Exception as exc:
-
-        return (
-            False,
-            f"DNS: {exc}"
-        )
-
-
-def health_check_entry(entry):
-
-    url = entry.get(
-        "url",
-        ""
-    ).strip()
-
-    if not url:
-
-        return (
-            False,
-            "EMPTY_URL"
-        )
-
-    try:
-
-        parsed = urllib.parse.urlparse(
-            url
-        )
-
-    except Exception as exc:
-
-        return (
-            False,
-            f"INVALID_URL: {exc}"
-        )
-
-    if parsed.scheme.lower() not in (
-        "http",
-        "https",
-    ):
-
-        # ----------------------------------------------------
-        # Non-HTTP streams cannot reliably be checked with
-        # urllib. Keep them instead of falsely deleting them.
-        # ----------------------------------------------------
-
-        return (
-            True,
-            "NON_HTTP_UNCHECKED"
-        )
-
-    if not parsed.hostname:
-
-        return (
-            False,
-            "NO_HOST"
-        )
-
-    # --------------------------------------------------------
-    # DNS
-    # --------------------------------------------------------
-
-    dns_ok, dns_reason = check_dns(
-        parsed.hostname
-    )
-
-    if not dns_ok:
-
-        return (
-            False,
-            dns_reason
-        )
-
-    # --------------------------------------------------------
-    # HTTP / HLS
-    # --------------------------------------------------------
-
-    headers = get_stream_headers(
-        entry
-    )
-
-    headers["Range"] = (
-        f"bytes=0-{HEALTH_CHECK_BYTES - 1}"
-    )
-
-    request = urllib.request.Request(
-        url,
-        headers=headers
-    )
-
-    last_reason = ""
-
-    for attempt in range(
-        HEALTH_CHECK_RETRIES + 1
-    ):
-
-        try:
-
-            with urllib.request.urlopen(
-                request,
-                timeout=HEALTH_CHECK_TIMEOUT
-            ) as response:
-
-                status = response.status
-
-                content_type = (
-                    response.headers.get(
-                        "Content-Type",
-                        ""
-                    )
-                )
-
-                data = response.read(
-                    HEALTH_CHECK_BYTES
-                )
-
-                # ------------------------------------------------
-                # Definite HTTP failure
-                # ------------------------------------------------
-
-                if status >= 400:
-
-                    return (
-                        False,
-                        f"HTTP_{status}"
-                    )
-
-                # ------------------------------------------------
-                # Empty response
-                # ------------------------------------------------
-
-                if not data:
-
-                    return (
-                        False,
-                        "EMPTY_RESPONSE"
-                    )
-
-                # ------------------------------------------------
-                # HLS validation
-                # ------------------------------------------------
-
-                if is_hls_content(
-                    data,
-                    content_type
-                ):
-
-                    text = data.decode(
-                        "utf-8",
-                        errors="ignore"
-                    )
-
-                    # A valid HLS manifest should at least
-                    # contain EXT-X or EXTINF information.
-                    if (
-                        "#EXT-X-" in text
-                        or "#EXTINF" in text
-                    ):
-
-                        return (
-                            True,
-                            "HLS_OK"
-                        )
-
-                    # Some servers return a manifest whose
-                    # useful data is beyond the first chunk.
-                    return (
-                        True,
-                        "HLS_MANIFEST"
-                    )
-
-                # ------------------------------------------------
-                # Generic HTTP stream
-                #
-                # Do not require HLS markers.
-                # ------------------------------------------------
-
-                return (
-                    True,
-                    f"HTTP_{status}"
-                )
-
-        except urllib.error.HTTPError as exc:
-
-            last_reason = (
-                f"HTTP_{exc.code}"
-            )
-
-            # 404 / 410 are definitely dead.
-            if exc.code in (
-                404,
-                410,
-            ):
-
-                return (
-                    False,
-                    last_reason
-                )
-
-            # Other HTTP errors get one retry.
-            if attempt < HEALTH_CHECK_RETRIES:
-
-                time.sleep(1)
-
-                continue
-
-            return (
-                False,
-                last_reason
-            )
-
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            socket.timeout
-        ) as exc:
-
-            last_reason = (
-                f"CONNECTION: {exc}"
-            )
-
-            if attempt < HEALTH_CHECK_RETRIES:
-
-                time.sleep(1)
-
-                continue
-
-            return (
-                False,
-                last_reason
-            )
-
-        except Exception as exc:
-
-            last_reason = (
-                f"ERROR: {exc}"
-            )
-
-            if attempt < HEALTH_CHECK_RETRIES:
-
-                time.sleep(1)
-
-                continue
-
-            return (
-                False,
-                last_reason
-            )
-
-    return (
-        False,
-        last_reason or "UNKNOWN"
-    )
-
-
-# ============================================================
-# HEALTH CHECK ALL ENTRIES
-# ============================================================
-
-def health_check_entries(entries):
-
-    if not entries:
-
-        return [], 0, 0, {}
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "HEALTH CHECK"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"URLs to test: {len(entries)}"
-    )
-
-    print(
-        f"Workers: {HEALTH_CHECK_WORKERS}"
-    )
-
-    print(
-        f"Timeout: {HEALTH_CHECK_TIMEOUT}s"
-    )
-
-    print()
-
-    healthy = []
-
-    failed = 0
-
-    reasons = Counter()
-
-    results = {}
-
-    with ThreadPoolExecutor(
-        max_workers=HEALTH_CHECK_WORKERS
-    ) as executor:
-
-        future_map = {
-            executor.submit(
-                health_check_entry,
-                entry
-            ): entry
-            for entry in entries
-        }
-
-        completed = 0
-
-        total = len(
-            future_map
-        )
-
-        for future in as_completed(
-            future_map
-        ):
-
-            entry = future_map[
-                future
-            ]
-
-            try:
-
-                ok, reason = future.result()
-
-            except Exception as exc:
-
-                ok = False
-
-                reason = (
-                    f"CHECK_EXCEPTION: "
-                    f"{exc}"
-                )
-
-            url = entry[
-                "url"
-            ].strip()
-
-            results[url] = (
-                ok,
-                reason
-            )
-
-            completed += 1
-
-            if ok:
-
-                healthy.append(
-                    entry
-                )
-
-            else:
-
-                failed += 1
-
-                reasons[
-                    reason.split(
-                        ":",
-                        1
-                    )[0]
-                ] += 1
-
-            if (
-                completed % 100 == 0
-                or completed == total
-            ):
-
-                print(
-                    f"  Checked "
-                    f"{completed}/"
-                    f"{total}"
-                    f" | Healthy: "
-                    f"{len(healthy)}"
-                    f" | Failed: "
-                    f"{failed}"
-                )
-
-    print()
-
-    print(
-        f"Healthy URLs: "
-        f"{len(healthy)}"
-    )
-
-    print(
-        f"Failed URLs: "
-        f"{failed}"
-    )
-
-    if reasons:
-
-        print()
-        print(
-            "FAILURE REASONS"
-        )
-
-        for reason, count in sorted(
-            reasons.items()
-        ):
-
-            print(
-                f"  {reason}: "
-                f"{count}"
-            )
-
-    return (
-        healthy,
-        failed,
-        len(entries),
-        results
-    )
-
-
-# ============================================================
-# PRIORITY DUPLICATE RESOLUTION
-# ============================================================
-
-def choose_preferred_entries(
-    entries
-):
-
-    """
-    Build candidates by channel identity.
-
-    Priority:
-
-        App M3U
-        My-Streams
-        Buddy Live
-        Other sources
-
-    IMPORTANT:
-
-    We do NOT immediately discard lower-priority URLs.
-
-    All candidates are retained until health checking.
-
-    This allows:
-
-        App M3U   -> DEAD
-        My-Streams -> HEALTHY
-
-    to result in My-Streams being selected.
-    """
-
-    candidates = defaultdict(list)
-
-    for entry in entries:
-
-        identity = get_channel_identity(
-            entry
-        )
-
-        candidates[
-            identity
-        ].append(
-            entry
-        )
-
-    groups = []
-
-    for identity, group in candidates.items():
-
-        group.sort(
-            key=lambda entry: (
-                get_source_priority(
-                    entry["repo"]
-                ),
-                entry["repo"].lower(),
-                entry["url"].lower(),
-            )
-        )
-
-        groups.append(
-            (
-                identity,
-                group
-            )
-        )
-
-    return groups
-
-
-# ============================================================
-# SELECT HEALTHY PREFERRED URL
-# ============================================================
-
-def select_best_entries(
-    candidate_groups,
-    health_results
-):
-
-    selected = []
-
-    no_healthy_candidate = 0
-
-    priority_replacements = 0
-
-    selected_source_counter = Counter()
-
-    for identity, candidates in candidate_groups:
-
-        # ----------------------------------------------------
-        # Sort by source priority first.
-        # ----------------------------------------------------
-
-        candidates = sorted(
-            candidates,
-            key=lambda entry: (
-                get_source_priority(
-                    entry["repo"]
-                ),
-                entry["repo"].lower(),
-                entry["url"].lower(),
-            )
-        )
-
-        healthy_candidates = []
-
-        for entry in candidates:
-
-            url = entry[
-                "url"
-            ].strip()
-
-            result = health_results.get(
-                url
-            )
-
-            if result and result[0]:
-
-                healthy_candidates.append(
-                    entry
-                )
-
-        # ----------------------------------------------------
-        # No healthy URL
-        # ----------------------------------------------------
-
-        if not healthy_candidates:
-
-            no_healthy_candidate += 1
-
-            continue
-
-        # ----------------------------------------------------
-        # Highest priority healthy URL
-        # ----------------------------------------------------
-
-        best = healthy_candidates[0]
-
-        # ----------------------------------------------------
-        # Did health check force us away from the highest
-        # priority source?
-        # ----------------------------------------------------
-
-        if (
-            candidates
-            and best["repo"]
-            != candidates[0]["repo"]
-        ):
-
-            priority_replacements += 1
-
-        selected.append(
-            best
-        )
-
-        selected_source_counter[
-            best["repo"]
-        ] += 1
-
-    return (
-        selected,
-        no_healthy_candidate,
-        priority_replacements,
-        selected_source_counter
-    )
-
-
-# ============================================================
 # EXTINF OUTPUT
 # ============================================================
 
@@ -1464,9 +723,17 @@ def rebuild_extinf(
         entry["attrs"]
     )
 
+    # --------------------------------------------------------
+    # Replace ONLY group-title
+    # --------------------------------------------------------
+
     attributes["group-title"] = (
         final_group
     )
+
+    # --------------------------------------------------------
+    # Preferred ordering
+    # --------------------------------------------------------
 
     preferred_order = [
 
@@ -1485,9 +752,6 @@ def rebuild_extinf(
         "catchup",
         "catchup-days",
         "catchup-source",
-
-        "http-user-agent",
-        "http-referrer",
     ]
 
     ordered_keys = []
@@ -1500,6 +764,10 @@ def rebuild_extinf(
                 key
             )
 
+    # --------------------------------------------------------
+    # Preserve every other attribute
+    # --------------------------------------------------------
+
     for key in attributes:
 
         if key not in ordered_keys:
@@ -1507,6 +775,10 @@ def rebuild_extinf(
             ordered_keys.append(
                 key
             )
+
+    # --------------------------------------------------------
+    # Build attributes
+    # --------------------------------------------------------
 
     attribute_string = " ".join(
         f'{key}="{attributes[key]}"'
@@ -1525,22 +797,215 @@ def rebuild_extinf(
 
 
 # ============================================================
+# PRIORITY-BASED DUPLICATE REMOVAL
+# ============================================================
+
+def remove_duplicates(entries):
+
+    print(
+        "Removing duplicates with source priority..."
+    )
+
+    print()
+
+    # ========================================================
+    # NORMAL SOURCES
+    #
+    # Any URL found in ANY normal source defeats the same
+    # URL in App M3U / My-Streams / Buddy Live.
+    #
+    # Normal sources NEVER defeat each other.
+    # ========================================================
+
+    normal_source_urls = set()
+
+    for entry in entries:
+
+        stream_url = entry["url"].strip()
+
+        if not stream_url:
+            continue
+
+        final_group = entry["final_group"]
+
+        if final_group not in LOW_PRIORITY_GROUPS:
+
+            normal_source_urls.add(
+                stream_url
+            )
+
+    # ========================================================
+    # URLS FROM LOW-PRIORITY GROUPS
+    # ========================================================
+
+    low_priority_urls = defaultdict(set)
+
+    for entry in entries:
+
+        stream_url = entry["url"].strip()
+
+        if not stream_url:
+            continue
+
+        final_group = entry["final_group"]
+
+        if final_group in LOW_PRIORITY_GROUPS:
+
+            low_priority_urls[
+                final_group
+            ].add(
+                stream_url
+            )
+
+    # ========================================================
+    # MARK ENTRIES TO REMOVE
+    # ========================================================
+
+    urls_to_remove = set()
+
+    # ========================================================
+    # NORMAL SOURCES BEAT ALL THREE SPECIAL SOURCES
+    # ========================================================
+
+    for group in LOW_PRIORITY_GROUPS:
+
+        for stream_url in low_priority_urls[group]:
+
+            if stream_url in normal_source_urls:
+
+                urls_to_remove.add(
+                    (
+                        group,
+                        stream_url
+                    )
+                )
+
+    # ========================================================
+    # PRIORITY BETWEEN THE THREE SPECIAL SOURCES
+    #
+    # Higher number = higher priority.
+    #
+    # Buddy Live > My-Streams > App M3U
+    # ========================================================
+
+    for entry in entries:
+
+        stream_url = entry["url"].strip()
+
+        if not stream_url:
+            continue
+
+        current_group = entry["final_group"]
+
+        if current_group not in LOW_PRIORITY_GROUPS:
+            continue
+
+        current_priority = LOW_PRIORITY_GROUPS[
+            current_group
+        ]
+
+        for other_group, other_priority in (
+            LOW_PRIORITY_GROUPS.items()
+        ):
+
+            if other_priority <= current_priority:
+                continue
+
+            if stream_url in low_priority_urls.get(
+                other_group,
+                set()
+            ):
+
+                urls_to_remove.add(
+                    (
+                        current_group,
+                        stream_url
+                    )
+                )
+
+                break
+
+    # ========================================================
+    # BUILD FINAL LIST
+    # ========================================================
+
+    unique_entries = []
+
+    duplicate_count = 0
+
+    seen_low_priority = set()
+
+    for entry in entries:
+
+        stream_url = entry["url"].strip()
+
+        if not stream_url:
+            continue
+
+        current_group = entry["final_group"]
+
+        # ----------------------------------------------------
+        # Remove lower-priority duplicate
+        # ----------------------------------------------------
+
+        if (
+            current_group,
+            stream_url
+        ) in urls_to_remove:
+
+            duplicate_count += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Exact duplicate INSIDE the same low-priority group
+        # ----------------------------------------------------
+
+        if current_group in LOW_PRIORITY_GROUPS:
+
+            key = (
+                current_group,
+                stream_url
+            )
+
+            if key in seen_low_priority:
+
+                duplicate_count += 1
+
+                continue
+
+            seen_low_priority.add(
+                key
+            )
+
+        # ----------------------------------------------------
+        # NORMAL SOURCES
+        #
+        # ALWAYS KEEP.
+        #
+        # Even if the same URL exists in another normal
+        # source, both entries remain.
+        # ----------------------------------------------------
+
+        unique_entries.append(
+            entry
+        )
+
+    return (
+        unique_entries,
+        duplicate_count
+    )
+
+
+# ============================================================
 # MAIN BUILD
 # ============================================================
 
 def build():
 
-    print(
-        "=" * 70
-    )
-
-    print(
-        "FAST ALL REGIONS BUILDER"
-    )
-
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("FAST ALL REGIONS BUILDER")
+    print("=" * 70)
 
     print(
         f"Source: {OWNER}"
@@ -1561,10 +1026,8 @@ def build():
         "FIRST LEVEL ONLY"
     )
 
-    print()
-
     print(
-        "SPECIAL CATEGORY SOURCES:"
+        "Special category sources:"
     )
 
     print(
@@ -1572,36 +1035,17 @@ def build():
     )
 
     print(
+        "  Buddy Live  -> Buddy Live"
+    )
+
+    print(
         "  My-Streams  -> My-Streams"
     )
 
     print(
-        "  Buddy Live  -> Buddy Live"
+        "Normal sources have priority over "
+        "App M3U / My-Streams / Buddy Live"
     )
-
-    print()
-
-    print(
-        "SOURCE PRIORITY:"
-    )
-
-    print(
-        "  1. App M3U"
-    )
-
-    print(
-        "  2. My-Streams"
-    )
-
-    print(
-        "  3. Buddy Live"
-    )
-
-    print(
-        "  4. All other sources"
-    )
-
-    print()
 
     print(
         "Region guessing: DISABLED"
@@ -1612,24 +1056,23 @@ def build():
     )
 
     print(
-        "Channel-name guessing: "
-        "DISABLED"
+        "Channel-name guessing: DISABLED"
     )
 
     print(
-        "Duplicate resolution: "
-        "CHANNEL IDENTITY + SOURCE PRIORITY"
-    )
-
-    print(
-        "Health checking: "
-        f"{'ENABLED' if HEALTH_CHECK_ENABLED else 'DISABLED'}"
+        "Duplicate detection: "
+        "PRIORITY-BASED"
     )
 
     print()
 
     print(
         "GitHub API authentication: "
+        "ENABLED"
+    )
+
+    print(
+        "GitHub API rate-limit protection: "
         "ENABLED"
     )
 
@@ -1726,6 +1169,10 @@ def build():
             len(playlist_files)
         )
 
+        # ====================================================
+        # PROCESS PLAYLIST FILES
+        # ====================================================
+
         for playlist_path in playlist_files:
 
             try:
@@ -1773,7 +1220,17 @@ def build():
                     entries
                 )
 
+                # =================================================
+                # PROCESS CHANNELS
+                # =================================================
+
                 for entry in entries:
+
+                    # ------------------------------------------------
+                    # SPECIAL SOURCE LOGIC
+                    #
+                    # DO NOT read original group-title.
+                    # ------------------------------------------------
 
                     if repo_name in SPECIAL_GROUPS:
 
@@ -1811,12 +1268,6 @@ def build():
                         final_group
                     )
 
-                    entry["source_priority"] = (
-                        get_source_priority(
-                            repo_name
-                        )
-                    )
-
                     all_entries.append(
                         entry
                     )
@@ -1837,199 +1288,18 @@ def build():
         print()
 
     # ========================================================
-    # RAW URL DUPLICATE COUNT
+    # PRIORITY-BASED DUPLICATE REMOVAL
     # ========================================================
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "RAW URL ANALYSIS"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    raw_seen = set()
-
-    raw_duplicates = 0
-
-    for entry in all_entries:
-
-        url = entry[
-            "url"
-        ].strip()
-
-        if not url:
-            continue
-
-        if url in raw_seen:
-
-            raw_duplicates += 1
-
-        else:
-
-            raw_seen.add(
-                url
-            )
-
-    print(
-        f"Entries collected: "
-        f"{len(all_entries)}"
-    )
-
-    print(
-        f"Unique URLs before selection: "
-        f"{len(raw_seen)}"
-    )
-
-    print(
-        f"Exact duplicate URLs: "
-        f"{raw_duplicates}"
-    )
-
-    # ========================================================
-    # CHANNEL CANDIDATES
-    # ========================================================
-
-    print()
-
-    print(
-        "Building channel candidates..."
-    )
-
-    candidate_groups = (
-        choose_preferred_entries(
-            all_entries
-        )
-    )
-
-    print(
-        f"Channel identity groups: "
-        f"{len(candidate_groups)}"
-    )
-
-    # ========================================================
-    # HEALTH CHECK
-    # ========================================================
-
-    # --------------------------------------------------------
-    # Important:
-    #
-    # We test ALL unique candidate URLs.
-    #
-    # We do NOT simply test the first priority source.
-    #
-    # This allows:
-    #
-    # App M3U       DEAD
-    # My-Streams    HEALTHY
-    #
-    # to select My-Streams.
-    # --------------------------------------------------------
-
-    candidate_entries = []
-
-    seen_candidate_urls = set()
-
-    for identity, candidates in candidate_groups:
-
-        for entry in candidates:
-
-            url = entry[
-                "url"
-            ].strip()
-
-            if not url:
-                continue
-
-            if url in seen_candidate_urls:
-                continue
-
-            seen_candidate_urls.add(
-                url
-            )
-
-            candidate_entries.append(
-                entry
-            )
-
-    if HEALTH_CHECK_ENABLED:
-
-        (
-            healthy_entries,
-            failed_count,
-            tested_count,
-            health_results
-        ) = health_check_entries(
-            candidate_entries
-        )
-
-    else:
-
-        health_results = {}
-
-        for entry in candidate_entries:
-
-            health_results[
-                entry["url"].strip()
-            ] = (
-                True,
-                "NOT_CHECKED"
-            )
-
-        failed_count = 0
-
-        tested_count = 0
-
-    # ========================================================
-    # SELECT BEST HEALTHY URL
-    # ========================================================
-
-    print()
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "SELECTING BEST STREAMS"
-    )
-
-    print(
-        "=" * 70
-    )
 
     (
         unique_entries,
-        no_healthy_candidate,
-        priority_replacements,
-        selected_source_counter
-    ) = select_best_entries(
-        candidate_groups,
-        health_results
-    )
-
-    print(
-        f"Final channels: "
-        f"{len(unique_entries)}"
-    )
-
-    print(
-        f"Channels with no healthy URL: "
-        f"{no_healthy_candidate}"
-    )
-
-    print(
-        f"Priority fallbacks caused by "
-        f"unhealthy higher source: "
-        f"{priority_replacements}"
+        duplicate_count
+    ) = remove_duplicates(
+        all_entries
     )
 
     # ========================================================
-    # SAFETY CHECK SPECIAL CATEGORIES
+    # FINAL CATEGORY COUNT
     # ========================================================
 
     category_counter = Counter()
@@ -2039,6 +1309,12 @@ def build():
         category_counter[
             entry["final_group"]
         ] += 1
+
+    # ========================================================
+    # SAFETY CHECK
+    #
+    # These three sources MUST NOT generate subcategories.
+    # ========================================================
 
     forbidden_prefixes = (
         "App M3U |",
@@ -2052,9 +1328,7 @@ def build():
 
         for prefix in forbidden_prefixes:
 
-            if category.startswith(
-                prefix
-            ):
+            if category.startswith(prefix):
 
                 bad_special_categories.append(
                     category
@@ -2063,16 +1337,13 @@ def build():
     if bad_special_categories:
 
         print()
-
         print(
             "ERROR: Special-source "
             "subcategories detected!"
         )
 
         for category in sorted(
-            set(
-                bad_special_categories
-            )
+            set(bad_special_categories)
         ):
 
             print(
@@ -2090,12 +1361,6 @@ def build():
     # WRITE OUTPUT
     # ========================================================
 
-    print()
-
-    print(
-        "Writing output playlist..."
-    )
-
     with open(
         OUTPUT_FILE,
         "w",
@@ -2103,9 +1368,17 @@ def build():
         newline="\n"
     ) as output:
 
+        # ----------------------------------------------------
+        # M3U HEADER
+        # ----------------------------------------------------
+
         output.write(
             "#EXTM3U\n"
         )
+
+        # ----------------------------------------------------
+        # CHANNELS
+        # ----------------------------------------------------
 
         for entry in unique_entries:
 
@@ -2126,19 +1399,9 @@ def build():
     # SUMMARY
     # ========================================================
 
-    print()
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "BUILD COMPLETE"
-    )
-
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("BUILD COMPLETE")
+    print("=" * 70)
 
     print(
         f"Repositories discovered: "
@@ -2151,38 +1414,13 @@ def build():
     )
 
     print(
-        f"Unique channel identities: "
-        f"{len(candidate_groups)}"
-    )
-
-    print(
-        f"Unique candidate URLs tested: "
-        f"{tested_count}"
-    )
-
-    print(
-        f"Healthy URLs: "
-        f"{tested_count - failed_count}"
-    )
-
-    print(
-        f"Failed URLs: "
-        f"{failed_count}"
-    )
-
-    print(
-        f"Final playable channels: "
+        f"Unique playlist entries: "
         f"{len(unique_entries)}"
     )
 
     print(
-        f"Channels without healthy URL: "
-        f"{no_healthy_candidate}"
-    )
-
-    print(
-        f"Priority fallbacks: "
-        f"{priority_replacements}"
+        f"Priority duplicates removed: "
+        f"{duplicate_count}"
     )
 
     print(
@@ -2196,43 +1434,10 @@ def build():
     )
 
     # ========================================================
-    # SELECTED SOURCE SUMMARY
-    # ========================================================
-
-    print()
-
-    print(
-        "SELECTED SOURCE SUMMARY"
-    )
-
-    print(
-        "-" * 70
-    )
-
-    for repo_name, count in sorted(
-        selected_source_counter.items(),
-        key=lambda x: (
-            get_source_priority(x[0]),
-            x[0].lower()
-        )
-    ):
-
-        source_name = SOURCE_NAME_MAP.get(
-            repo_name,
-            repo_name
-        )
-
-        print(
-            f"{source_name}: "
-            f"{count}"
-        )
-
-    # ========================================================
     # CATEGORY SUMMARY
     # ========================================================
 
     print()
-
     print(
         "CATEGORY SUMMARY"
     )
@@ -2255,7 +1460,6 @@ def build():
     # ========================================================
 
     print()
-
     print(
         "SOURCE SUMMARY"
     )
@@ -2291,7 +1495,6 @@ def build():
     if empty_playlists:
 
         print()
-
         print(
             f"EMPTY PLAYLISTS: "
             f"{len(empty_playlists)}"
@@ -2310,7 +1513,6 @@ def build():
     if failed_playlists:
 
         print()
-
         print(
             f"FAILED PLAYLISTS: "
             f"{len(failed_playlists)}"
@@ -2323,10 +1525,7 @@ def build():
             )
 
     print()
-
-    print(
-        "Done."
-    )
+    print("Done.")
 
 
 # ============================================================
@@ -2334,5 +1533,4 @@ def build():
 # ============================================================
 
 if __name__ == "__main__":
-
     build()
