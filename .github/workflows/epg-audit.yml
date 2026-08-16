@@ -1,473 +1,492 @@
-name: Merge M3U + EPG
+name: Generate EPG
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "30 */6 * * *"
+
+permissions:
+  contents: write
 
 jobs:
-  merge:
+  epg:
     runs-on: ubuntu-latest
 
     steps:
 
-      # --------------------------------------------------
-      # 1. Checkout repository
-      # --------------------------------------------------
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
 
-      # --------------------------------------------------
-      # 2. Download EPG artifact from previous run
-      # --------------------------------------------------
-      - name: Download EPG artifact
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p epg_artifact
-
-          gh run download 31958511043 \
-            --repo Faridcj/fast-all-regions \
-            --dir epg_artifact
-
-          echo ""
-          echo "======================================"
-          echo "ARTIFACT FILES"
-          echo "======================================"
-
-          find epg_artifact -type f -print
-
-
-      # --------------------------------------------------
-      # 3. Inspect artifact files
-      # --------------------------------------------------
-      - name: Inspect artifact
-        run: |
-          echo ""
-          echo "======================================"
-          echo "FILE TYPES"
-          echo "======================================"
-
-          find epg_artifact -type f -exec file {} \;
-
-          echo ""
-          echo "======================================"
-          echo "FILE CONTENT PREVIEW"
-          echo "======================================"
-
-          while IFS= read -r file; do
-
-            echo ""
-            echo "--------------------------------------"
-            echo "FILE: $file"
-            echo "--------------------------------------"
-
-            head -c 300 "$file" | cat -v
-
-            echo ""
-
-          done < <(find epg_artifact -type f)
-
-
-      # --------------------------------------------------
-      # 4. Find actual XMLTV EPG file
-      # --------------------------------------------------
-      - name: Find EPG XML
-        run: |
-          EPG_FILE=""
-
-          while IFS= read -r file; do
-
-            echo "Checking: $file"
-
-            # Check normal XMLTV
-            if head -c 1000 "$file" 2>/dev/null | grep -qiE '<tv[ >]|<channel[ >]|<programme[ >]'; then
-              EPG_FILE="$file"
-              break
-            fi
-
-            # Check gzip compressed XMLTV
-            if file "$file" | grep -qi gzip; then
-
-              if gzip -cd "$file" 2>/dev/null | head -c 1000 | grep -qiE '<tv[ >]|<channel[ >]|<programme[ >]'; then
-                EPG_FILE="$file"
-                break
-              fi
-
-            fi
-
-          done < <(find epg_artifact -type f)
-
-
-          if [ -z "$EPG_FILE" ]; then
-            echo ""
-            echo "======================================"
-            echo "ERROR: EPG XML FILE NOT FOUND"
-            echo "======================================"
-            exit 1
-          fi
-
-
-          echo ""
-          echo "======================================"
-          echo "EPG FOUND"
-          echo "======================================"
-
-          echo "$EPG_FILE"
-
-          echo "EPG_FILE=$EPG_FILE" >> "$GITHUB_ENV"
-
-
-      # --------------------------------------------------
-      # 5. Setup Python
-      # --------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
 
-      # --------------------------------------------------
-      # 6. Install dependencies
-      # --------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
 
 
-      # --------------------------------------------------
-      # 7. Create merge script
-      # --------------------------------------------------
-      - name: Create merge script
+      - name: Download EPG sources
         run: |
 
-          cat > merge_epg.py <<'PY'
+          mkdir -p epg_sources
 
-          import os
+          cat > download_epg.py <<'PY'
+
           import gzip
-          import re
-          import requests
+          import urllib.request
+          from pathlib import Path
+
+
+          USER_AGENT = (
+              "Mozilla/5.0 "
+              "(compatible; FAST-EPG/4.0)"
+          )
+
+
+          SOURCES = {
+
+              "samsung": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/samsungtvplus/main/"
+                  "output/samsung_tvplus.xml",
+              ],
+
+              "lg": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/lg-playlist-generator/main/"
+                  "lg_channels_us.xml",
+              ],
+
+              "tcl": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/tcl-playlist-generator/main/"
+                  "tcl_epg.xml",
+              ],
+
+              "rakuten": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/RakutenTV/main/"
+                  "epg.xml",
+              ],
+
+              "airy": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/airy-playlist-generator/main/"
+                  "airy_channels.xml",
+              ],
+
+              "pluto": [
+                  "https://raw.githubusercontent.com/"
+                  "matthuisman/i.mjh.nz/refs/heads/master/"
+                  "PlutoTV/all.xml.gz",
+
+                  "https://raw.githubusercontent.com/"
+                  "matthuisman/i.mjh.nz/refs/heads/master/"
+                  "PlutoTV/all.xml",
+              ],
+
+              "plex": [
+                  "https://raw.githubusercontent.com/"
+                  "matthuisman/i.mjh.nz/refs/heads/master/"
+                  "Plex/all.xml.gz",
+
+                  "https://raw.githubusercontent.com/"
+                  "matthuisman/i.mjh.nz/refs/heads/master/"
+                  "Plex/all.xml",
+              ],
+
+              "xumo": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/xumo-playlist-generator/main/"
+                  "xumo_epg.xml.gz",
+
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/xumo-playlist-generator/main/"
+                  "xumo_epg.xml",
+              ],
+
+              "tubi": [
+                  "https://raw.githubusercontent.com/"
+                  "BuddyChewChew/tubi-scraper/main/"
+                  "tubi_epg.xml",
+              ],
+          }
+
+
+          def download(url):
+
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": USER_AGENT,
+                      "Accept": "*/*",
+                  },
+              )
+
+              with urllib.request.urlopen(
+                  request,
+                  timeout=120,
+              ) as response:
+
+                  return response.read()
+
+
+          for name, urls in SOURCES.items():
+
+              success = False
+
+              for index, url in enumerate(urls):
+
+                  print("")
+                  print("=" * 70)
+                  print("SOURCE:", name)
+                  print("URL:", url)
+                  print("=" * 70)
+
+                  try:
+
+                      data = download(url)
+
+                      # Validate gzip if necessary
+                      if data[:2] == b"\x1f\x8b":
+
+                          print("Detected gzip")
+
+                          # Keep XML uncompressed
+                          data = gzip.decompress(
+                              data
+                          )
+
+                      # Basic XMLTV validation
+                      if (
+                          b"<tv" not in data[:5000]
+                          and
+                          b"<channel" not in data[:5000]
+                      ):
+
+                          raise RuntimeError(
+                              "Downloaded file does not "
+                              "look like XMLTV"
+                          )
+
+                      output = (
+                          Path("epg_sources")
+                          / f"{name}.xml"
+                      )
+
+                      output.write_bytes(data)
+
+                      print(
+                          "Downloaded:",
+                          output
+                      )
+
+                      print(
+                          "Size:",
+                          len(data),
+                          "bytes"
+                      )
+
+                      success = True
+                      break
+
+                  except Exception as exc:
+
+                      print(
+                          "FAILED:",
+                          exc
+                      )
+
+              if not success:
+
+                  print(
+                      "WARNING:",
+                      name,
+                      "could not be downloaded"
+                  )
+
+          PY
+
+          python download_epg.py
+
+
+      - name: Build combined XMLTV
+        run: |
+
+          cat > combine_epg.py <<'PY'
+
           import xml.etree.ElementTree as ET
           from pathlib import Path
 
 
-          # --------------------------------------------------
-          # SOURCE M3U
-          # --------------------------------------------------
+          SOURCE_DIR = Path(
+              "epg_sources"
+          )
 
-          M3U_URL = (
-              "https://raw.githubusercontent.com/"
-              "Faridcj/fast-all-regions/main/"
-              "fast-all-regions.m3u"
+          OUTPUT = Path(
+              "epg.xml"
           )
 
 
-          # --------------------------------------------------
-          # FILES
-          # --------------------------------------------------
+          root = ET.Element("tv")
 
-          EPG_FILE = Path(os.environ["EPG_FILE"])
 
-          OUTPUT = Path("fast-all-regions-epg.m3u")
-
-
-          # --------------------------------------------------
-          # Normalize channel names
-          # --------------------------------------------------
-
-          def normalize(text):
-
-              if not text:
-                  return ""
-
-              text = text.lower()
-
-              # Remove common separators
-              text = re.sub(
-                  r"[\s_\-\.]+",
-                  "",
-                  text
-              )
-
-              # Keep letters/numbers
-              text = re.sub(
-                  r"[^a-z0-9]+",
-                  "",
-                  text
-              )
-
-              return text
-
-
-          # --------------------------------------------------
-          # Read EPG
-          # --------------------------------------------------
-
-          def load_epg(path):
-
-              print("Reading EPG:", path)
-
-              data = path.read_bytes()
-
-
-              # Detect gzip
-              if data[:2] == b"\x1f\x8b":
-
-                  print("EPG is gzip compressed")
-
-                  data = gzip.decompress(data)
-
-
-              print(
-                  "EPG size:",
-                  len(data),
-                  "bytes"
-              )
-
-
-              # Parse XML
-              root = ET.fromstring(data)
-
-
-              epg = {}
-
-
-              # XMLTV channels
-              for channel in root.findall(".//channel"):
-
-                  channel_id = channel.get("id")
-
-                  if not channel_id:
-                      continue
-
-
-                  # Every display-name can be useful
-                  for name in channel.findall("display-name"):
-
-                      if not name.text:
-                          continue
-
-                      normalized = normalize(
-                          name.text
-                      )
-
-                      if normalized:
-
-                          epg[normalized] = channel_id
-
-
-              return epg
-
-
-          # --------------------------------------------------
-          # Find matching EPG ID
-          # --------------------------------------------------
-
-          def find_epg_id(
-              channel_name,
-              epg
-          ):
-
-              normalized_name = normalize(
-                  channel_name
-              )
-
-
-              if not normalized_name:
-                  return None
-
-
-              # Exact match
-              if normalized_name in epg:
-
-                  return epg[
-                      normalized_name
-                  ]
-
-
-              # Partial match
-              for epg_name, epg_id in epg.items():
-
-                  if (
-                      normalized_name in epg_name
-                      or
-                      epg_name in normalized_name
-                  ):
-
-                      return epg_id
-
-
-              return None
-
-
-          # --------------------------------------------------
-          # Download M3U
-          # --------------------------------------------------
-
-          print("")
-          print("======================================")
-          print("DOWNLOADING M3U")
-          print("======================================")
-
-
-          response = requests.get(
-              M3U_URL,
-              timeout=120
-          )
-
-          response.raise_for_status()
-
-
-          m3u = response.text
-
-
-          print(
-              "M3U size:",
-              len(m3u),
-              "characters"
-          )
-
-
-          # --------------------------------------------------
-          # Load EPG
-          # --------------------------------------------------
-
-          print("")
-          print("======================================")
-          print("LOADING EPG")
-          print("======================================")
-
-
-          epg = load_epg(
-              EPG_FILE
-          )
-
-
-          print(
-              "EPG names:",
-              len(epg)
-          )
-
-
-          # --------------------------------------------------
-          # Merge
-          # --------------------------------------------------
-
-          print("")
-          print("======================================")
-          print("MERGING")
-          print("======================================")
-
-
-          lines = m3u.splitlines()
-
-          output = []
+          seen_channels = set()
 
           total_channels = 0
-          matched_channels = 0
+          total_programmes = 0
+
+          successful_sources = 0
 
 
-          for line in lines:
+          for file in sorted(
+              SOURCE_DIR.glob("*.xml")
+          ):
+
+              print("")
+              print("=" * 70)
+              print("PROCESSING:", file)
+              print("=" * 70)
+
+              try:
+
+                  tree = ET.parse(file)
+
+                  source_root = (
+                      tree.getroot()
+                  )
+
+                  source_channels = 0
+                  source_programmes = 0
 
 
-              if line.startswith(
-                  "#EXTINF"
-              ):
+                  # ----------------------------------------
+                  # Channels
+                  # ----------------------------------------
 
-                  total_channels += 1
+                  for channel in source_root.findall(
+                      ".//channel"
+                  ):
 
-
-                  # Extract channel name
-                  if "," in line:
-
-                      channel_name = (
-                          line.split(
-                              ",",
-                              1
-                          )[1].strip()
+                      channel_id = (
+                          channel.get("id")
                       )
 
-                  else:
+                      if not channel_id:
+                          continue
 
-                      channel_name = ""
+                      if channel_id in seen_channels:
+                          continue
+
+                      seen_channels.add(
+                          channel_id
+                      )
+
+                      root.append(
+                          channel
+                      )
+
+                      source_channels += 1
+                      total_channels += 1
 
 
-                  # Find EPG
-                  epg_id = find_epg_id(
-                      channel_name,
-                      epg
+                  # ----------------------------------------
+                  # Programmes
+                  # ----------------------------------------
+
+                  for programme in source_root.findall(
+                      ".//programme"
+                  ):
+
+                      root.append(
+                          programme
+                      )
+
+                      source_programmes += 1
+                      total_programmes += 1
+
+
+                  successful_sources += 1
+
+
+                  print(
+                      "Channels:",
+                      source_channels
+                  )
+
+                  print(
+                      "Programmes:",
+                      source_programmes
+                  )
+
+              except Exception as exc:
+
+                  print(
+                      "ERROR:",
+                      exc
                   )
 
 
-                  if epg_id:
+          # --------------------------------------------
+          # XML declaration
+          # --------------------------------------------
 
+          tree = ET.ElementTree(
+              root
+          )
 
-                      # Existing tvg-id
-                      if 'tvg-id="' in line:
-
-                          line = re.sub(
-                              r'tvg-id="[^"]*"',
-                              f'tvg-id="{epg_id}"',
-                              line
-                          )
-
-
-                      # No tvg-id
-                      else:
-
-                          line = line.replace(
-                              "#EXTINF:",
-                              f'#EXTINF: tvg-id="{epg_id}"',
-                              1
-                          )
-
-
-                      matched_channels += 1
-
-
-                  output.append(
-                      line
-                  )
-
-
-              else:
-
-                  output.append(
-                      line
-                  )
-
-
-          # --------------------------------------------------
-          # Write output
-          # --------------------------------------------------
-
-          OUTPUT.write_text(
-              "\n".join(output) + "\n",
-              encoding="utf-8"
+          tree.write(
+              OUTPUT,
+              encoding="utf-8",
+              xml_declaration=True
           )
 
 
-          # --------------------------------------------------
-          # Statistics
-          # --------------------------------------------------
-
           print("")
-          print("======================================")
-          print("RESULT")
-          print("======================================")
+          print("=" * 70)
+          print("FINAL EPG")
+          print("=" * 70)
 
           print(
-              "Total channels:",
+              "Sources:",
+              successful_sources
+          )
+
+          print(
+              "Channels:",
               total_channels
           )
 
           print(
-              "EPG matched:",
-              matched_channels
+              "Programmes:",
+              total_programmes
           )
 
           print(
-              "EPG unmatched:",
-              total_channels -
-              matched_channels
+              "Output:",
+              OUTPUT
           )
+
+          print(
+              "Size:",
+              OUTPUT.stat().st_size,
+              "bytes"
+          )
+
+          PY
+
+          python combine_epg.py
+
+
+      - name: Validate EPG
+        run: |
+
+          python - <<'PY'
+
+          import xml.etree.ElementTree as ET
+
+          file = "epg.xml"
+
+          tree = ET.parse(file)
+
+          root = tree.getroot()
+
+          channels = root.findall(
+              ".//channel"
+          )
+
+          programmes = root.findall(
+              ".//programme"
+          )
+
+          print("")
+          print("=" * 70)
+          print("EPG VALIDATION")
+          print("=" * 70)
+
+          print(
+              "Root:",
+              root.tag
+          )
+
+          print(
+              "Channels:",
+              len(channels)
+          )
+
+          print(
+              "Programmes:",
+              len(programmes)
+          )
+
+          if root.tag != "tv":
+              raise SystemExit(
+                  "Invalid XMLTV root"
+              )
+
+          if not channels:
+              raise SystemExit(
+                  "No channels found"
+              )
+
+          if not programmes:
+              print(
+                  "WARNING: No programmes found"
+              )
+
+          print(
+              "EPG XML VALID"
+          )
+
+          PY
+
+
+      - name: Run EPG audit
+        run: |
+
+          python scripts/epg_audit.py
+
+
+      - name: Upload EPG XML
+        uses: actions/upload-artifact@v4
+        with:
+          name: epg-xml
+          path: epg.xml
+          if-no-files-found: error
+
+
+      - name: Upload EPG audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: epg-audit-report
+          path: epg-audit.txt
+          if-no-files-found: error
+
+
+      - name: Commit EPG XML
+        run: |
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add epg.xml
+
+          if git diff --cached --quiet; then
+
+            echo "No EPG changes."
+
+          else
+
+            git commit \
+              -m "Update combined EPG"
+
+            git push
+
+          fi
