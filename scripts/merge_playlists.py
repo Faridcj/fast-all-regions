@@ -31,10 +31,158 @@ PLAYLIST_EXTENSIONS = (
 
 
 # ============================================================
+# SOURCE NORMALIZATION
+# ============================================================
+
+SOURCE_NAMES = {
+
+    # --------------------------------------------------------
+    # AIRY
+    # --------------------------------------------------------
+
+    "airy-playlist-generator":
+        "Airy",
+
+    # --------------------------------------------------------
+    # APP M3U
+    # --------------------------------------------------------
+
+    "app-m3u-generator":
+        "App M3U",
+
+    # --------------------------------------------------------
+    # BUDDY LIVE
+    # --------------------------------------------------------
+
+    "buddylive":
+        "Buddy Live",
+
+    "buddylive-combined":
+        "Buddy Live",
+
+    "buddylive_v2":
+        "Buddy Live",
+
+    # --------------------------------------------------------
+    # LG
+    # --------------------------------------------------------
+
+    "lg-playlist-generator":
+        "LG",
+
+    "lg-playlist-generator2":
+        "LG",
+
+    # --------------------------------------------------------
+    # MY STREAMS
+    # --------------------------------------------------------
+
+    "My-Streams":
+        "My-Streams",
+
+    # --------------------------------------------------------
+    # NZ
+    # --------------------------------------------------------
+
+    "nz":
+        "NZ",
+
+    # --------------------------------------------------------
+    # PLEX
+    # --------------------------------------------------------
+
+    "plex":
+        "Plex",
+
+    "plex-alt-fast-channels":
+        "Plex",
+
+    # --------------------------------------------------------
+    # PLUTO
+    # --------------------------------------------------------
+
+    "pluto":
+        "Pluto TV",
+
+    # --------------------------------------------------------
+    # RAKUTEN
+    # --------------------------------------------------------
+
+    "RakutenTV":
+        "Rakuten TV",
+
+    # --------------------------------------------------------
+    # ROKU
+    # --------------------------------------------------------
+
+    "roku-playlist-generator":
+        "Roku",
+
+    # --------------------------------------------------------
+    # SAMSUNG TV PLUS
+    # --------------------------------------------------------
+
+    "samsungtvplus":
+        "Samsung TV Plus",
+
+    # --------------------------------------------------------
+    # TCL
+    # --------------------------------------------------------
+
+    "tcl-playlist-generator":
+        "TCL",
+
+    # --------------------------------------------------------
+    # TUBI
+    # --------------------------------------------------------
+
+    "tubi-scraper":
+        "Tubi",
+
+    # --------------------------------------------------------
+    # XUMO
+    # --------------------------------------------------------
+
+    "xumo-playlist-generator":
+        "Xumo",
+}
+
+
+# ============================================================
+# HARD-CONSOLIDATED SOURCES
+#
+# IMPORTANT:
+#
+# These repositories MUST have exactly ONE group.
+#
+# Their original group-title is completely ignored.
+# ============================================================
+
+CONSOLIDATED_SOURCES = {
+
+    "app-m3u-generator":
+        "App M3U",
+
+    "buddylive":
+        "Buddy Live",
+
+    "buddylive-combined":
+        "Buddy Live",
+
+    "buddylive_v2":
+        "Buddy Live",
+
+    "My-Streams":
+        "My-Streams",
+}
+
+
+# ============================================================
 # HTTP HELPERS
 # ============================================================
 
 def http_get(url, timeout=45, retries=3):
+
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "*/*",
@@ -48,21 +196,29 @@ def http_get(url, timeout=45, retries=3):
     last_error = None
 
     for attempt in range(retries):
+
         try:
+
             with urllib.request.urlopen(
                 request,
                 timeout=timeout
             ) as response:
+
                 return response.read()
 
         except urllib.error.HTTPError as exc:
+
             last_error = exc
 
             if exc.code == 404:
                 raise
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+
+                time.sleep(
+                    2 ** attempt
+                )
+
                 continue
 
             raise
@@ -71,10 +227,15 @@ def http_get(url, timeout=45, retries=3):
             urllib.error.URLError,
             TimeoutError
         ) as exc:
+
             last_error = exc
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+
+                time.sleep(
+                    2 ** attempt
+                )
+
                 continue
 
             raise
@@ -82,7 +243,12 @@ def http_get(url, timeout=45, retries=3):
     raise last_error
 
 
-def http_get_text(url, timeout=45, retries=3):
+def http_get_text(
+    url,
+    timeout=45,
+    retries=3
+):
+
     data = http_get(
         url,
         timeout=timeout,
@@ -95,7 +261,11 @@ def http_get_text(url, timeout=45, retries=3):
     )
 
 
-def github_api(path, retries=3):
+def github_api(
+    path,
+    retries=3
+):
+
     url = GITHUB_API + path
 
     headers = {
@@ -111,36 +281,48 @@ def github_api(path, retries=3):
     last_error = None
 
     for attempt in range(retries):
+
         try:
+
             with urllib.request.urlopen(
                 request,
                 timeout=45
             ) as response:
 
                 return json.loads(
-                    response.read().decode("utf-8")
+                    response.read().decode(
+                        "utf-8"
+                    )
                 )
 
         except urllib.error.HTTPError as exc:
+
             last_error = exc
 
             if exc.code == 404:
                 raise
 
             if exc.code == 403:
+
                 remaining = exc.headers.get(
                     "X-RateLimit-Remaining"
                 )
 
                 if remaining == "0":
+
                     raise RuntimeError(
                         "GitHub API rate limit exceeded"
                     )
 
             if attempt < retries - 1:
+
                 time.sleep(
-                    min(10, 2 ** attempt)
+                    min(
+                        10,
+                        2 ** attempt
+                    )
                 )
+
                 continue
 
             raise
@@ -153,7 +335,11 @@ def github_api(path, retries=3):
             last_error = exc
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+
+                time.sleep(
+                    2 ** attempt
+                )
+
                 continue
 
             raise
@@ -162,87 +348,23 @@ def github_api(path, retries=3):
 
 
 # ============================================================
-# SOURCE NAME NORMALIZATION
+# SOURCE NAME
 # ============================================================
 
 def normalize_source_name(repo_name):
-    """
-    Repository name -> clean output source name.
 
-    This is based ONLY on the repository name.
-    No channel-name guessing.
-    No URL guessing.
-    No region guessing.
-    """
-
-    mapping = {
-
-        "airy-playlist-generator":
-            "Airy",
-
-        "app-m3u-generator":
-            "App M3U",
-
-        "buddylive":
-            "Buddy Live",
-
-        "buddylive-combined":
-            "Buddy Live",
-
-        "buddylive_v2":
-            "Buddy Live",
-
-        "lg-playlist-generator":
-            "LG",
-
-        "lg-playlist-generator2":
-            "LG",
-
-        "My-Streams":
-            "My-Streams",
-
-        "nz":
-            "NZ",
-
-        "plex":
-            "Plex",
-
-        "plex-alt-fast-channels":
-            "Plex",
-
-        "pluto":
-            "Pluto TV",
-
-        "RakutenTV":
-            "Rakuten TV",
-
-        "roku-playlist-generator":
-            "Roku",
-
-        "samsungtvplus":
-            "Samsung TV Plus",
-
-        "tcl-playlist-generator":
-            "TCL",
-
-        "tubi-scraper":
-            "Tubi",
-
-        "xumo-playlist-generator":
-            "Xumo",
-    }
-
-    return mapping.get(
+    return SOURCE_NAMES.get(
         repo_name,
         repo_name
     )
 
 
 # ============================================================
-# GROUP HANDLING
+# GROUP CLEANING
 # ============================================================
 
 def clean_group(group):
+
     if not group:
         return ""
 
@@ -257,20 +379,27 @@ def clean_group(group):
     return group
 
 
+# ============================================================
+# FIRST LEVEL GROUP
+# ============================================================
+
 def get_first_level_group(group):
+
     """
-    Keep only the first level of the ORIGINAL M3U group.
+    Used ONLY for sources that are NOT consolidated.
 
     Example:
 
         News | US | Local
 
-    ->
+    becomes:
 
         News
     """
 
-    group = clean_group(group)
+    group = clean_group(
+        group
+    )
 
     if not group:
         return ""
@@ -285,6 +414,7 @@ def get_first_level_group(group):
     for separator in separators:
 
         if separator in group:
+
             group = group.split(
                 separator,
                 1
@@ -295,70 +425,53 @@ def get_first_level_group(group):
     return group
 
 
-def get_final_group(repo_name, original_group):
+# ============================================================
+# FINAL GROUP
+# ============================================================
+
+def get_final_group(
+    repo_name,
+    original_group
+):
+
     """
-    ============================================================
-    ABSOLUTE CATEGORY RULES
-    ============================================================
+    Determines the ONLY group-title that will be written.
+
+    ----------------------------------------------------------
+    CONSOLIDATED SOURCES
+    ----------------------------------------------------------
 
     App M3U
-        ALL entries -> App M3U
+        -> App M3U
 
     Buddy Live
-        ALL entries -> Buddy Live
+        -> Buddy Live
 
     My-Streams
-        ALL entries -> My-Streams
+        -> My-Streams
 
-    Other repositories
-        Source | ORIGINAL FIRST-LEVEL GROUP
+    Their original group-title is NEVER inspected.
 
-    IMPORTANT:
+    ----------------------------------------------------------
+    OTHER SOURCES
+    ----------------------------------------------------------
 
-    For the three consolidated sources, the original
-    group-title is NEVER inspected.
-
-    Therefore strings such as:
-
-        APP M3U UNITED STATES CHANNEL-ID =xxxx
-
-        United States
-
-        Sports
-
-        News | Something
-
-    can NEVER create additional categories.
+    Source | Original First-Level Group
     """
 
-    # --------------------------------------------------------
-    # APP M3U
-    # --------------------------------------------------------
+    # ========================================================
+    # HARD CONSOLIDATION
+    # ========================================================
 
-    if repo_name == "app-m3u-generator":
-        return "App M3U"
+    if repo_name in CONSOLIDATED_SOURCES:
 
-    # --------------------------------------------------------
-    # BUDDY LIVE
-    # --------------------------------------------------------
+        return CONSOLIDATED_SOURCES[
+            repo_name
+        ]
 
-    if repo_name in (
-        "buddylive",
-        "buddylive-combined",
-        "buddylive_v2",
-    ):
-        return "Buddy Live"
-
-    # --------------------------------------------------------
-    # MY-STREAMS
-    # --------------------------------------------------------
-
-    if repo_name == "My-Streams":
-        return "My-Streams"
-
-    # --------------------------------------------------------
-    # ALL OTHER SOURCES
-    # --------------------------------------------------------
+    # ========================================================
+    # NORMAL SOURCE
+    # ========================================================
 
     source = normalize_source_name(
         repo_name
@@ -369,6 +482,7 @@ def get_final_group(repo_name, original_group):
     )
 
     if not first_level:
+
         return source
 
     return (
@@ -387,28 +501,38 @@ ATTRIBUTE_PATTERN = re.compile(
 
 
 def parse_extinf(line):
+
     attributes = {}
 
     comma = line.find(",")
 
     if comma >= 0:
+
         metadata = line[:comma]
+
         channel_name = line[
             comma + 1:
         ].strip()
+
     else:
+
         metadata = line
         channel_name = ""
 
     for match in ATTRIBUTE_PATTERN.finditer(
         metadata
     ):
+
         key = match.group(1)
+
         value = match.group(2)
 
         attributes[key] = value
 
-    return attributes, channel_name
+    return (
+        attributes,
+        channel_name
+    )
 
 
 # ============================================================
@@ -420,7 +544,9 @@ def parse_m3u(text):
     entries = []
 
     current_attributes = None
+
     current_name = None
+
     waiting_for_url = False
 
     for raw_line in text.splitlines():
@@ -430,21 +556,38 @@ def parse_m3u(text):
         if not line:
             continue
 
-        if line.startswith("#EXTINF"):
+        # ----------------------------------------------------
+        # EXTINF
+        # ----------------------------------------------------
 
-            attributes, name = parse_extinf(
-                line
+        if line.startswith(
+            "#EXTINF"
+        ):
+
+            attributes, name = (
+                parse_extinf(line)
             )
 
-            current_attributes = attributes
+            current_attributes = (
+                attributes
+            )
+
             current_name = name
 
             waiting_for_url = True
 
             continue
 
+        # ----------------------------------------------------
+        # Other M3U directives
+        # ----------------------------------------------------
+
         if line.startswith("#"):
             continue
+
+        # ----------------------------------------------------
+        # STREAM URL
+        # ----------------------------------------------------
 
         if waiting_for_url:
 
@@ -453,15 +596,24 @@ def parse_m3u(text):
             if stream_url:
 
                 entries.append({
-                    "name": current_name or "",
-                    "attrs": dict(
-                        current_attributes or {}
-                    ),
-                    "url": stream_url,
+
+                    "name":
+                        current_name or "",
+
+                    "attrs":
+                        dict(
+                            current_attributes
+                            or {}
+                        ),
+
+                    "url":
+                        stream_url,
                 })
 
             current_attributes = None
+
             current_name = None
+
             waiting_for_url = False
 
     return entries
@@ -487,7 +639,9 @@ def discover_repositories():
             f"&page={page}"
         )
 
-        data = github_api(path)
+        data = github_api(
+            path
+        )
 
         if not data:
             break
@@ -498,10 +652,14 @@ def discover_repositories():
             if repo.get("fork"):
                 continue
 
-            name = repo.get("name")
+            name = repo.get(
+                "name"
+            )
 
             if name:
-                repositories.append(name)
+                repositories.append(
+                    name
+                )
 
         if len(data) < 100:
             break
@@ -518,7 +676,9 @@ def discover_repositories():
 # PLAYLIST FILE DISCOVERY
 # ============================================================
 
-def discover_playlist_files(repo_name):
+def discover_playlist_files(
+    repo_name
+):
 
     repo_path = (
         f"/repos/"
@@ -566,7 +726,10 @@ def discover_playlist_files(repo_name):
         if path.lower().endswith(
             PLAYLIST_EXTENSIONS
         ):
-            files.append(path)
+
+            files.append(
+                path
+            )
 
     return sorted(
         files,
@@ -586,6 +749,7 @@ def raw_url(
     encoded_parts = []
 
     for part in file_path.split("/"):
+
         encoded_parts.append(
             urllib.parse.quote(
                 part,
@@ -620,27 +784,42 @@ def rebuild_extinf(
     )
 
     # ========================================================
-    # CRITICAL:
+    # CRITICAL OVERRIDE
     #
-    # We overwrite group-title unconditionally.
+    # The ORIGINAL group-title is always destroyed.
     #
-    # No original group-title can survive here.
+    # The ONLY group-title written to the final M3U is:
+    #
+    #     final_group
+    #
+    # This guarantees that consolidated sources cannot
+    # leak their original thousands of group names.
     # ========================================================
 
-    attributes["group-title"] = (
-        final_group
-    )
+    attributes[
+        "group-title"
+    ] = final_group
 
     preferred_order = [
+
         "tvg-id",
+
         "tvg-name",
+
         "tvg-logo",
+
         "group-title",
+
         "tvg-language",
+
         "tvg-country",
+
         "tvg-url",
+
         "catchup",
+
         "catchup-days",
+
         "catchup-source",
     ]
 
@@ -649,15 +828,23 @@ def rebuild_extinf(
     for key in preferred_order:
 
         if key in attributes:
-            ordered_keys.append(key)
+
+            ordered_keys.append(
+                key
+            )
 
     for key in attributes:
 
         if key not in ordered_keys:
-            ordered_keys.append(key)
+
+            ordered_keys.append(
+                key
+            )
 
     attribute_string = " ".join(
+
         f'{key}="{attributes[key]}"'
+
         for key in ordered_keys
     )
 
@@ -679,7 +866,11 @@ def rebuild_extinf(
 def build():
 
     print("=" * 70)
-    print("FAST ALL REGIONS BUILDER")
+
+    print(
+        "FAST ALL REGIONS BUILDER"
+    )
+
     print("=" * 70)
 
     print(
@@ -719,15 +910,17 @@ def build():
     )
 
     print()
+
     print(
         "GitHub API authentication: "
         "DISABLED"
     )
+
     print()
 
-    # --------------------------------------------------------
+    # ========================================================
     # DISCOVER REPOSITORIES
-    # --------------------------------------------------------
+    # ========================================================
 
     try:
 
@@ -738,6 +931,7 @@ def build():
     except Exception as exc:
 
         print()
+
         print(
             "ERROR: Could not discover "
             "repositories."
@@ -756,9 +950,9 @@ def build():
 
     print()
 
-    # --------------------------------------------------------
+    # ========================================================
     # STORAGE
-    # --------------------------------------------------------
+    # ========================================================
 
     all_entries = []
 
@@ -774,9 +968,9 @@ def build():
 
     failed_playlists = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # PROCESS REPOSITORIES
-    # --------------------------------------------------------
+    # ========================================================
 
     for repo_name in repositories:
 
@@ -812,13 +1006,15 @@ def build():
 
         source_stats[
             repo_name
-        ]["files_found"] = (
-            len(playlist_files)
+        ][
+            "files_found"
+        ] = len(
+            playlist_files
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # PROCESS PLAYLIST FILES
-        # ----------------------------------------------------
+        # ====================================================
 
         for playlist_path in playlist_files:
 
@@ -837,6 +1033,10 @@ def build():
                     text
                 )
 
+                # ------------------------------------------------
+                # EMPTY
+                # ------------------------------------------------
+
                 if not entries:
 
                     print(
@@ -851,6 +1051,10 @@ def build():
 
                     continue
 
+                # ------------------------------------------------
+                # OK
+                # ------------------------------------------------
+
                 print(
                     f"  [OK] "
                     f"{playlist_path}: "
@@ -859,29 +1063,39 @@ def build():
 
                 source_stats[
                     repo_name
-                ]["files_ok"] += 1
+                ][
+                    "files_ok"
+                ] += 1
 
                 source_stats[
                     repo_name
-                ]["entries"] += len(
+                ][
+                    "entries"
+                ] += len(
                     entries
                 )
 
-                # ------------------------------------------------
+                # =================================================
                 # PROCESS ENTRIES
-                # ------------------------------------------------
+                # =================================================
 
                 for entry in entries:
 
                     original_group = (
-                        entry["attrs"].get(
+                        entry[
+                            "attrs"
+                        ].get(
                             "group-title",
                             ""
                         )
                     )
 
-                    # THIS is the only place where the
-                    # final category is determined.
+                    # ------------------------------------------------
+                    # FINAL CATEGORY
+                    #
+                    # This is the ONLY category decision.
+                    # ------------------------------------------------
+
                     final_group = (
                         get_final_group(
                             repo_name,
@@ -889,17 +1103,17 @@ def build():
                         )
                     )
 
-                    entry["repo"] = (
-                        repo_name
-                    )
+                    entry[
+                        "repo"
+                    ] = repo_name
 
-                    entry["playlist_path"] = (
-                        playlist_path
-                    )
+                    entry[
+                        "playlist_path"
+                    ] = playlist_path
 
-                    entry["final_group"] = (
-                        final_group
-                    )
+                    entry[
+                        "final_group"
+                    ] = final_group
 
                     all_entries.append(
                         entry
@@ -920,9 +1134,9 @@ def build():
 
         print()
 
-    # --------------------------------------------------------
+    # ========================================================
     # DUPLICATE STREAM REMOVAL
-    # --------------------------------------------------------
+    # ========================================================
 
     print(
         "Removing duplicate stream URLs..."
@@ -939,13 +1153,18 @@ def build():
     for entry in all_entries:
 
         stream_url = (
-            entry["url"].strip()
+            entry[
+                "url"
+            ].strip()
         )
 
         if not stream_url:
             continue
 
-        # EXACT URL comparison.
+        # ----------------------------------------------------
+        # EXACT STREAM URL DEDUPLICATION
+        # ----------------------------------------------------
+
         if stream_url in seen_urls:
 
             duplicate_count += 1
@@ -960,21 +1179,23 @@ def build():
             entry
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # FINAL CATEGORY COUNT
-    # --------------------------------------------------------
+    # ========================================================
 
     category_counter = Counter()
 
     for entry in unique_entries:
 
         category_counter[
-            entry["final_group"]
+            entry[
+                "final_group"
+            ]
         ] += 1
 
-    # --------------------------------------------------------
+    # ========================================================
     # WRITE OUTPUT
-    # --------------------------------------------------------
+    # ========================================================
 
     with open(
         OUTPUT_FILE,
@@ -990,15 +1211,21 @@ def build():
         for entry in unique_entries:
 
             output.write(
+
                 rebuild_extinf(
                     entry,
-                    entry["final_group"]
+                    entry[
+                        "final_group"
+                    ]
                 )
+
                 + "\n"
             )
 
             output.write(
-                entry["url"].strip()
+                entry[
+                    "url"
+                ].strip()
                 + "\n"
             )
 
@@ -1007,7 +1234,11 @@ def build():
     # ========================================================
 
     print("=" * 70)
-    print("BUILD COMPLETE")
+
+    print(
+        "BUILD COMPLETE"
+    )
+
     print("=" * 70)
 
     print(
@@ -1040,14 +1271,16 @@ def build():
         f"{OUTPUT_FILE}"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CATEGORY SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     print()
+
     print(
         "CATEGORY SUMMARY"
     )
+
     print(
         "-" * 70
     )
@@ -1061,14 +1294,16 @@ def build():
             f"{category}: {count}"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SOURCE SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     print()
+
     print(
         "SOURCE SUMMARY"
     )
+
     print(
         "-" * 70
     )
@@ -1082,7 +1317,10 @@ def build():
         if not stats:
             continue
 
-        if stats["files_found"] == 0:
+        if stats[
+            "files_found"
+        ] == 0:
+
             continue
 
         print(
@@ -1093,13 +1331,14 @@ def build():
             f"{stats['files_found']} files"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # EMPTY PLAYLISTS
-    # --------------------------------------------------------
+    # ========================================================
 
     if empty_playlists:
 
         print()
+
         print(
             f"EMPTY PLAYLISTS: "
             f"{len(empty_playlists)}"
@@ -1111,13 +1350,14 @@ def build():
                 f"  {playlist}"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # FAILED PLAYLISTS
-    # --------------------------------------------------------
+    # ========================================================
 
     if failed_playlists:
 
         print()
+
         print(
             f"FAILED PLAYLISTS: "
             f"{len(failed_playlists)}"
@@ -1130,7 +1370,10 @@ def build():
             )
 
     print()
-    print("Done.")
+
+    print(
+        "Done."
+    )
 
 
 # ============================================================
@@ -1138,4 +1381,5 @@ def build():
 # ============================================================
 
 if __name__ == "__main__":
+
     build()
