@@ -3,7 +3,6 @@
 import gzip
 import re
 import sys
-import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -18,27 +17,48 @@ REPORT_FILE = "epg-audit.txt"
 
 USER_AGENT = (
     "Mozilla/5.0 "
-    "(compatible; FAST-EPG-Audit/1.0)"
+    "(compatible; FAST-EPG-Audit/2.0)"
 )
 
 
 # ============================================================
 # EPG SOURCES
+#
+# Multiple URLs are tried in order.
+# The first valid XMLTV source is used.
 # ============================================================
 
 EPG_SOURCES = {
+
+    # --------------------------------------------------------
+    # Samsung TV Plus
+    # --------------------------------------------------------
 
     "Samsung TV Plus": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/samsungtvplus/main/"
         "output/samsung_tvplus.xml",
+
+        "https://i.mjh.nz/SamsungTVPlus/us.xml",
     ],
+
+
+    # --------------------------------------------------------
+    # LG Channels
+    # --------------------------------------------------------
 
     "LG TV": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/lg-playlist-generator/main/"
         "lg_channels_us.xml",
+
+        "https://i.mjh.nz/LGTV/us.xml",
     ],
+
+
+    # --------------------------------------------------------
+    # TCL
+    # --------------------------------------------------------
 
     "TCL": [
         "https://raw.githubusercontent.com/"
@@ -46,17 +66,32 @@ EPG_SOURCES = {
         "tcl_epg.xml",
     ],
 
+
+    # --------------------------------------------------------
+    # Rakuten TV
+    # --------------------------------------------------------
+
     "Rakuten TV": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/RakutenTV/main/"
         "epg.xml",
     ],
 
+
+    # --------------------------------------------------------
+    # Airy TV
+    # --------------------------------------------------------
+
     "Airy TV": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/airy-playlist-generator/main/"
         "airy_channels.xml",
     ],
+
+
+    # --------------------------------------------------------
+    # Pluto TV
+    # --------------------------------------------------------
 
     "Pluto TV": [
         "https://raw.githubusercontent.com/"
@@ -66,24 +101,109 @@ EPG_SOURCES = {
         "https://raw.githubusercontent.com/"
         "matthuisman/i.mjh.nz/refs/heads/master/"
         "PlutoTV/all.xml",
+
+        "https://i.mjh.nz/PlutoTV/all.xml",
     ],
+
+
+    # --------------------------------------------------------
+    # Plex
+    # --------------------------------------------------------
 
     "Plex TV": [
         "https://raw.githubusercontent.com/"
         "matthuisman/i.mjh.nz/refs/heads/master/"
-        "Plex/all.xml.gz",
+        "Plex/us.xml.gz",
+
+        "https://raw.githubusercontent.com/"
+        "matthuisman/i.mjh.nz/refs/heads/master/"
+        "Plex/us.xml",
+
+        "https://i.mjh.nz/Plex/us.xml",
     ],
+
+
+    # --------------------------------------------------------
+    # Xumo
+    #
+    # Keep Xumo enabled.
+    # Try known public EPG/API-derived sources.
+    # --------------------------------------------------------
 
     "Xumo": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/xumo-playlist-generator/main/"
         "xumo_epg.xml.gz",
+
+        "https://raw.githubusercontent.com/"
+        "BuddyChewChew/xumo-playlist-generator/main/"
+        "xumo_epg.xml",
+
+        "https://i.mjh.nz/Xumo/us.xml",
     ],
+
+
+    # --------------------------------------------------------
+    # Tubi
+    # --------------------------------------------------------
 
     "Tubi": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/tubi-scraper/main/"
         "tubi_epg.xml",
+
+        "https://i.mjh.nz/Tubi/us.xml",
+    ],
+
+
+    # --------------------------------------------------------
+    # Roku
+    # --------------------------------------------------------
+
+    "Roku": [
+        "https://i.mjh.nz/Roku/us.xml",
+    ],
+
+
+    # --------------------------------------------------------
+    # DistroTV
+    # --------------------------------------------------------
+
+    "DistroTV": [
+        "https://i.mjh.nz/DistroTV/us.xml",
+    ],
+
+
+    # --------------------------------------------------------
+    # Local / additional FAST sources
+    # --------------------------------------------------------
+
+    "App M3U": [
+        "https://epg.pw/xmltv/epg_US.xml",
+    ],
+
+    "Buddy Live": [
+        "https://epg.pw/xmltv/epg_US.xml",
+    ],
+
+    "My-Streams": [
+        "https://epg.pw/xmltv/epg_US.xml",
+    ],
+
+    "NZ": [
+        "https://epg.pw/xmltv/epg_NZ.xml",
+    ],
+
+    "oly": [
+        "https://epg.pw/xmltv/epg_US.xml",
+    ],
+
+    "Sports": [
+        "https://epg.pw/xmltv/epg_US.xml",
+    ],
+
+    "whiplash-epg": [
+        "https://epg.pw/xmltv/epg_US.xml",
     ],
 }
 
@@ -124,11 +244,8 @@ def parse_extinf(line):
     comma = line.find(",")
 
     if comma >= 0:
-
         metadata = line[:comma]
-
     else:
-
         metadata = line
 
     attributes = {}
@@ -213,7 +330,7 @@ def load_m3u():
 
 
 # ============================================================
-# XMLTV
+# XMLTV PARSER
 # ============================================================
 
 def parse_xmltv(data):
@@ -230,9 +347,7 @@ def parse_xmltv(data):
         ".//channel"
     ):
 
-        channel_id = (
-            channel.get("id")
-        )
+        channel_id = channel.get("id")
 
         if channel_id:
 
@@ -244,7 +359,101 @@ def parse_xmltv(data):
 
 
 # ============================================================
-# SOURCE MATCH
+# NORMALIZED ID MATCHING
+#
+# Some providers use slightly different ID formatting.
+# Keep the original exact match first, then normalized match.
+# ============================================================
+
+def normalize_id(value):
+
+    value = value.strip().lower()
+
+    value = value.replace(
+        " ", ""
+    )
+
+    value = value.replace(
+        "_", ""
+    )
+
+    value = value.replace(
+        "-", ""
+    )
+
+    return value
+
+
+def build_normalized_ids(ids):
+
+    result = {}
+
+    for value in ids:
+
+        normalized = normalize_id(
+            value
+        )
+
+        if normalized:
+
+            result.setdefault(
+                normalized,
+                set()
+            ).add(value)
+
+    return result
+
+
+def calculate_match(
+    m3u_ids,
+    epg_ids,
+):
+
+    # Exact matching first.
+    exact_matches = (
+        m3u_ids & epg_ids
+    )
+
+    matched = set(
+        exact_matches
+    )
+
+    # Normalized fallback.
+    unmatched_m3u = (
+        m3u_ids - matched
+    )
+
+    if unmatched_m3u:
+
+        epg_normalized = (
+            build_normalized_ids(
+                epg_ids
+            )
+        )
+
+        for m3u_id in unmatched_m3u:
+
+            normalized = (
+                normalize_id(
+                    m3u_id
+                )
+            )
+
+            if (
+                normalized
+                and normalized
+                in epg_normalized
+            ):
+
+                matched.add(
+                    m3u_id
+                )
+
+    return matched
+
+
+# ============================================================
+# SOURCE AUDIT
 # ============================================================
 
 def audit_source(
@@ -253,14 +462,28 @@ def audit_source(
 ):
 
     result = {
+
         "source": source_name,
-        "m3u": len(m3u_ids),
+
+        "m3u": len(
+            m3u_ids
+        ),
+
         "epg": 0,
+
         "matched": 0,
-        "missing": len(m3u_ids),
+
+        "missing": len(
+            m3u_ids
+        ),
+
         "rate": 0.0,
+
         "epg_url": "",
+
         "error": "",
+
+        "attempts": [],
     }
 
     urls = EPG_SOURCES.get(
@@ -276,25 +499,29 @@ def audit_source(
 
         return result
 
-    errors = []
 
     for url in urls:
 
         try:
 
             print(
-                f"  Downloading EPG: "
-                f"{source_name}"
+                f"  Trying EPG: "
+                f"{url}"
             )
 
-            data = http_get(url)
+            data = http_get(
+                url
+            )
 
             epg_ids = parse_xmltv(
                 data
             )
 
             matched_ids = (
-                m3u_ids & epg_ids
+                calculate_match(
+                    m3u_ids,
+                    epg_ids,
+                )
             )
 
             result["epg"] = len(
@@ -319,19 +546,22 @@ def audit_source(
                 )
 
             result["epg_url"] = url
+
             result["error"] = ""
 
             return result
 
         except Exception as exc:
 
-            errors.append(
+            result[
+                "attempts"
+            ].append(
                 f"{url} -> {exc}"
             )
 
+
     result["error"] = (
-        "All EPG sources failed: "
-        + " | ".join(errors)
+        "All EPG sources failed"
     )
 
     return result
@@ -412,10 +642,25 @@ def write_report(results):
                     f"{result['error']}\n"
                 )
 
+                for attempt in result[
+                    "attempts"
+                ]:
+
+                    report.write(
+                        f"  TRY        : "
+                        f"{attempt}\n"
+                    )
+
             report.write("\n")
 
-            total_m3u += result["m3u"]
-            total_matched += result["matched"]
+            total_m3u += (
+                result["m3u"]
+            )
+
+            total_matched += (
+                result["matched"]
+            )
+
 
         report.write(
             "=" * 70
@@ -453,6 +698,7 @@ def write_report(results):
 
             total_rate = 0
 
+
         report.write(
             f"MATCH RATE   : "
             f"{total_rate:.2f}%\n"
@@ -466,20 +712,29 @@ def write_report(results):
 def main():
 
     print("=" * 70)
-    print("FAST ALL REGIONS - EPG AUDIT")
+
+    print(
+        "FAST ALL REGIONS - EPG AUDIT"
+    )
+
     print("=" * 70)
+
 
     try:
 
-        source_channels = load_m3u()
+        source_channels = (
+            load_m3u()
+        )
 
     except Exception as exc:
 
         print(
-            f"ERROR reading M3U: {exc}"
+            f"ERROR reading M3U: "
+            f"{exc}"
         )
 
         sys.exit(1)
+
 
     print()
 
@@ -490,7 +745,9 @@ def main():
 
     print()
 
+
     results = []
+
 
     for source_name in sorted(
         source_channels,
@@ -511,6 +768,7 @@ def main():
         results.append(
             result
         )
+
 
         print(
             f"  M3U: "
@@ -537,6 +795,15 @@ def main():
             f"{result['rate']:.2f}%"
         )
 
+
+        if result["epg_url"]:
+
+            print(
+                f"  URL: "
+                f"{result['epg_url']}"
+            )
+
+
         if result["error"]:
 
             print(
@@ -544,11 +811,14 @@ def main():
                 f"{result['error']}"
             )
 
+
         print()
+
 
     write_report(
         results
     )
+
 
     print("=" * 70)
 
@@ -564,4 +834,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
