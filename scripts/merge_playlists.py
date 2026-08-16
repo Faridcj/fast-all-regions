@@ -1,14 +1,33 @@
 import json
+import os
 import re
+import time
+import base64
 import urllib.request
+import urllib.error
 from urllib.parse import quote, unquote
 from pathlib import PurePosixPath
 from collections import defaultdict
 
+
+# ============================================================
+# CONFIG
+# ============================================================
+
 OWNER = "BuddyChewChew"
 OUTPUT = "fast-all-regions.m3u"
 
+# GitHub repository where the final M3U is uploaded
+UPLOAD_REPOSITORY = "faridcj/fast-all-regions"
+UPLOAD_PATH = "fast-all-regions.m3u"
+UPLOAD_BRANCH = "main"
+
 REQUEST_TIMEOUT = 90
+
+# IMPORTANT:
+# Your GitHub token is read from the environment.
+# NEVER put the real token directly in this file.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
 API_HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -16,8 +35,13 @@ API_HEADERS = {
 }
 
 HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 FAST-All-Regions-Builder"
+    "User-Agent": "Mozilla/5.0 FAST-All-Regions-Builder",
 }
+
+
+# ============================================================
+# PLAYLIST SETTINGS
+# ============================================================
 
 PLAYLIST_EXTENSIONS = (
     ".m3u",
@@ -178,31 +202,88 @@ COUNTRIES = {
 
 
 # ============================================================
-# HTTP
+# HTTP HELPERS
 # ============================================================
 
-def fetch_bytes(url, headers=None):
+def fetch_bytes(url, headers=None, retries=3):
 
     headers = headers or HTTP_HEADERS
 
-    request = urllib.request.Request(
-        url,
-        headers=headers
-    )
+    last_error = None
 
-    with urllib.request.urlopen(
-        request,
-        timeout=REQUEST_TIMEOUT
-    ) as response:
+    for attempt in range(1, retries + 1):
 
-        return response.read()
+        try:
+
+            request = urllib.request.Request(
+                url,
+                headers=headers
+            )
+
+            with urllib.request.urlopen(
+                request,
+                timeout=REQUEST_TIMEOUT
+            ) as response:
+
+                return response.read()
+
+        except urllib.error.HTTPError as error:
+
+            last_error = error
+
+            if error.code == 429 or error.code == 403:
+
+                retry_after = error.headers.get(
+                    "Retry-After"
+                )
+
+                if retry_after:
+                    try:
+                        wait = int(retry_after)
+                    except ValueError:
+                        wait = 10
+                else:
+                    wait = min(
+                        10 * attempt,
+                        60
+                    )
+
+                print(
+                    f"    [RETRY] HTTP {error.code}; "
+                    f"waiting {wait}s..."
+                )
+
+                time.sleep(wait)
+
+                continue
+
+            raise
+
+        except Exception as error:
+
+            last_error = error
+
+            if attempt < retries:
+
+                wait = min(
+                    3 * attempt,
+                    15
+                )
+
+                time.sleep(wait)
+
+            else:
+                raise
+
+    raise last_error
 
 
-def fetch_text(url, headers=None):
+def fetch_text(url, headers=None, retries=3):
 
     return fetch_bytes(
         url,
-        headers
+        headers,
+        retries
     ).decode(
         "utf-8",
         errors="replace"
@@ -214,13 +295,14 @@ def github_json(url):
     return json.loads(
         fetch_text(
             url,
-            API_HEADERS
+            API_HEADERS,
+            retries=4
         )
     )
 
 
 # ============================================================
-# GITHUB REPOSITORIES
+# GITHUB API
 # ============================================================
 
 def get_all_repositories():
@@ -281,17 +363,13 @@ def get_all_repositories():
     return repositories
 
 
-# ============================================================
-# GITHUB TREE
-# ============================================================
-
 def get_repository_tree(repo, branch):
 
     url = (
         f"https://api.github.com/repos/"
         f"{OWNER}/{quote(repo, safe='')}"
         f"/git/trees/"
-        f"{quote(branch, safe='')}"
+        f"{quote(branch, safe='/')}"
         f"?recursive=1"
     )
 
@@ -369,66 +447,9 @@ def discover_playlists(repo, branch):
         if not is_playlist(path):
             continue
 
-        result.append(
-            {
-                "path": path,
-                "sha": item.get("sha"),
-                "size": item.get("size", 0),
-            }
-        )
+        result.append(path)
 
-    return sorted(
-        result,
-        key=lambda x: x["path"].lower()
-    )
-
-
-# ============================================================
-# READ GITHUB BLOB
-# ============================================================
-
-def fetch_github_blob(repo, sha):
-
-    if not sha:
-        raise RuntimeError(
-            "Missing blob SHA"
-        )
-
-    url = (
-        f"https://api.github.com/repos/"
-        f"{OWNER}/"
-        f"{quote(repo, safe='')}/"
-        f"git/blobs/"
-        f"{quote(sha, safe='')}"
-    )
-
-    data = github_json(url)
-
-    content = data.get(
-        "content",
-        ""
-    )
-
-    encoding = data.get(
-        "encoding",
-        ""
-    )
-
-    if encoding != "base64":
-        raise RuntimeError(
-            f"Unsupported blob encoding: {encoding}"
-        )
-
-    import base64
-
-    raw = base64.b64decode(
-        content
-    )
-
-    return raw.decode(
-        "utf-8",
-        errors="replace"
-    )
+    return sorted(result)
 
 
 # ============================================================
@@ -600,8 +621,6 @@ def detect_country(
     service
 ):
 
-    # 1. Explicit metadata
-
     for attr in (
         "country",
         "region",
@@ -622,8 +641,6 @@ def detect_country(
         if country:
             return country
 
-    # 2. Path / filename
-
     path_stem = (
         PurePosixPath(path)
         .stem
@@ -643,8 +660,6 @@ def detect_country(
 
         if country:
             return country
-
-    # 3. Original group
 
     original_group = get_attribute(
         extinf,
@@ -667,8 +682,6 @@ def detect_country(
             if country:
                 return country
 
-    # 4. tvg-id
-
     tvgid = get_attribute(
         extinf,
         "tvg-id"
@@ -687,8 +700,6 @@ def detect_country(
 
             if country:
                 return country
-
-    # 5. Known US-oriented sources
 
     defaults = {
         "LG Channels": "US",
@@ -752,11 +763,10 @@ def parse_m3u(text):
         if not line:
             continue
 
-        if line.startswith(
-            "#EXTINF:"
-        ):
+        if line.startswith("#EXTINF:"):
 
             current_extinf = line
+
             continue
 
         if line.startswith("#"):
@@ -838,45 +848,182 @@ def get_previous_service(extinf):
 
 
 # ============================================================
-# SAFE OUTPUT
+# GITHUB UPLOAD
 # ============================================================
 
-def write_output(entries):
+def upload_to_github():
 
-    temp_output = (
-        OUTPUT
-        + ".tmp"
-    )
+    if not GITHUB_TOKEN:
 
-    with open(
-        temp_output,
-        "w",
-        encoding="utf-8",
-        newline="\n"
-    ) as file:
-
-        file.write(
-            "#EXTM3U\n"
+        print()
+        print(
+            "[ERROR] GITHUB_TOKEN is not set."
         )
 
-        for entry in entries:
+        print(
+            "Set it before running the script."
+        )
 
-            file.write(
-                entry["extinf"]
-                + "\n"
-            )
+        print(
+            'PowerShell example:'
+        )
 
-            file.write(
-                entry["url"]
-                + "\n"
-            )
+        print(
+            '$env:GITHUB_TOKEN="YOUR_TOKEN"'
+        )
 
-    import os
+        return False
 
-    os.replace(
-        temp_output,
-        OUTPUT
+    try:
+
+        with open(
+            OUTPUT,
+            "rb"
+        ) as file:
+
+            content = file.read()
+
+    except Exception as error:
+
+        print(
+            f"[ERROR] Cannot read output file: "
+            f"{error}"
+        )
+
+        return False
+
+    encoded = base64.b64encode(
+        content
+    ).decode(
+        "ascii"
     )
+
+    api_url = (
+        "https://api.github.com/repos/"
+        f"{UPLOAD_REPOSITORY}/contents/"
+        f"{quote(UPLOAD_PATH, safe='/')}"
+    )
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": (
+            f"Bearer {GITHUB_TOKEN}"
+        ),
+        "User-Agent": (
+            "FAST-All-Regions-Builder"
+        ),
+        "Content-Type": "application/json",
+    }
+
+    # --------------------------------------------------------
+    # Get existing file SHA
+    # --------------------------------------------------------
+
+    sha = None
+
+    try:
+
+        existing = json.loads(
+            fetch_text(
+                api_url
+                + f"?ref={quote(UPLOAD_BRANCH)}",
+                headers,
+                retries=3
+            )
+        )
+
+        sha = existing.get(
+            "sha"
+        )
+
+    except urllib.error.HTTPError as error:
+
+        if error.code != 404:
+
+            print(
+                f"[ERROR] Cannot check existing "
+                f"GitHub file: {error}"
+            )
+
+            return False
+
+    except Exception as error:
+
+        print(
+            f"[ERROR] Cannot check existing "
+            f"GitHub file: {error}"
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # Prepare upload
+    # --------------------------------------------------------
+
+    payload = {
+        "message": (
+            "Update fast-all-regions.m3u"
+        ),
+        "content": encoded,
+        "branch": UPLOAD_BRANCH,
+    }
+
+    if sha:
+        payload["sha"] = sha
+
+    data = json.dumps(
+        payload
+    ).encode(
+        "utf-8"
+    )
+
+    request = urllib.request.Request(
+        api_url,
+        data=data,
+        headers=headers,
+        method="PUT"
+    )
+
+    try:
+
+        with urllib.request.urlopen(
+            request,
+            timeout=REQUEST_TIMEOUT
+        ) as response:
+
+            response.read()
+
+        print()
+        print(
+            "[SUCCESS] M3U uploaded to GitHub."
+        )
+
+        print(
+            "Repository:"
+            f" {UPLOAD_REPOSITORY}"
+        )
+
+        print(
+            "File:"
+            f" {UPLOAD_PATH}"
+        )
+
+        print(
+            "Branch:"
+            f" {UPLOAD_BRANCH}"
+        )
+
+        return True
+
+    except Exception as error:
+
+        print()
+        print(
+            f"[ERROR] GitHub upload failed: "
+            f"{error}"
+        )
+
+        return False
 
 
 # ============================================================
@@ -923,9 +1070,7 @@ def main():
             )
 
     all_entries = []
-
     failed_files = []
-
     repository_stats = {}
 
     # ========================================================
@@ -942,7 +1087,7 @@ def main():
             f"=== {repo} ==="
         )
 
-        playlist_files = (
+        playlist_paths = (
             discover_playlists(
                 repo,
                 branch
@@ -951,11 +1096,11 @@ def main():
 
         print(
             f"Found "
-            f"{len(playlist_files)} "
+            f"{len(playlist_paths)} "
             f"playlist files"
         )
 
-        if not playlist_files:
+        if not playlist_paths:
 
             repository_stats[
                 repo
@@ -974,16 +1119,21 @@ def main():
         successful_files = 0
         repo_channels = 0
 
-        for playlist in playlist_files:
+        for path in playlist_paths:
 
-            path = playlist["path"]
-            sha = playlist["sha"]
+            raw_url = (
+                "https://raw.githubusercontent.com/"
+                f"{OWNER}/"
+                f"{quote(repo, safe='')}/"
+                f"{quote(path, safe='/')}"
+            )
 
             try:
 
-                text = fetch_github_blob(
-                    repo,
-                    sha
+                text = fetch_text(
+                    raw_url,
+                    HTTP_HEADERS,
+                    retries=4
                 )
 
                 entries = parse_m3u(
@@ -1071,18 +1221,18 @@ def main():
             repo
         ] = {
             "files": len(
-                playlist_files
+                playlist_paths
             ),
             "successful": successful_files,
             "channels": repo_channels,
         }
 
-        # ========================================================
-        # FALLBACK ONLY IF ENTIRE REPO FAILED
-        # ========================================================
+        # ====================================================
+        # FALLBACK
+        # ====================================================
 
         if (
-            len(playlist_files) > 0
+            len(playlist_paths) > 0
             and successful_files == 0
         ):
 
@@ -1135,9 +1285,7 @@ def main():
     )
 
     seen = set()
-
     unique_entries = []
-
     duplicate_count = 0
 
     for entry in all_entries:
@@ -1170,6 +1318,7 @@ def main():
         if dedup_key in seen:
 
             duplicate_count += 1
+
             continue
 
         seen.add(
@@ -1202,42 +1351,31 @@ def main():
     )
 
     # ========================================================
-    # FINAL SAFETY CHECK
+    # WRITE LOCAL OUTPUT
     # ========================================================
 
-    if len(unique_entries) == 0:
+    with open(
+        OUTPUT,
+        "w",
+        encoding="utf-8",
+        newline="\n"
+    ) as file:
 
-        print()
-        print("=" * 70)
-        print("BUILD ABORTED")
-        print("=" * 70)
-
-        print(
-            "No channels were discovered."
+        file.write(
+            "#EXTM3U\n"
         )
 
-        print(
-            "Existing output was NOT overwritten."
-        )
+        for entry in unique_entries:
 
-        print(
-            f"Output preserved: {OUTPUT}"
-        )
+            file.write(
+                entry["extinf"]
+                + "\n"
+            )
 
-        print(
-            f"Failed files: "
-            f"{len(failed_files)}"
-        )
-
-        return
-
-    # ========================================================
-    # WRITE OUTPUT
-    # ========================================================
-
-    write_output(
-        unique_entries
-    )
+            file.write(
+                entry["url"]
+                + "\n"
+            )
 
     # ========================================================
     # FINAL REPORT
@@ -1298,6 +1436,7 @@ def main():
     print(
         "SOURCE SUMMARY"
     )
+
     print(
         "-" * 70
     )
@@ -1336,6 +1475,17 @@ def main():
             print(
                 f"    {error}"
             )
+
+    # ========================================================
+    # UPLOAD TO GITHUB
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("UPLOADING M3U TO GITHUB")
+    print("=" * 70)
+
+    upload_to_github()
 
 
 if __name__ == "__main__":
