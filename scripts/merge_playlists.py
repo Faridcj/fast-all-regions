@@ -19,10 +19,7 @@ HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 FAST-All-Regions-Builder"
 }
 
-PLAYLIST_EXTENSIONS = (
-    ".m3u",
-    ".m3u8",
-)
+PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
 
 IGNORE_PARTS = {
     "epg",
@@ -182,7 +179,6 @@ COUNTRIES = {
 # ============================================================
 
 def fetch_bytes(url, headers=None):
-
     headers = headers or HTTP_HEADERS
 
     request = urllib.request.Request(
@@ -199,7 +195,6 @@ def fetch_bytes(url, headers=None):
 
 
 def fetch_text(url, headers=None):
-
     return fetch_bytes(
         url,
         headers
@@ -210,7 +205,6 @@ def fetch_text(url, headers=None):
 
 
 def github_json(url):
-
     return json.loads(
         fetch_text(
             url,
@@ -240,7 +234,6 @@ def get_all_repositories():
         )
 
         try:
-
             data = github_json(url)
 
         except Exception as error:
@@ -378,14 +371,14 @@ def clean_service_name(repo):
 
     known = {
         "app-m3u-generator": "FAST Apps",
-        "plex-alt-fast-channels": "Plex Alt",
+        "plex-alt-fast-channels": "Plex",
         "samsungtvplus": "Samsung TV Plus",
         "roku-playlist-generator": "Roku",
         "tubi-scraper": "Tubi",
         "xumo-playlist-generator": "Xumo",
         "localnow-playlist-generator": "Local Now",
         "lg-playlist-generator": "LG Channels",
-        "lg-playlist-generator2": "LG Channels 2",
+        "lg-playlist-generator2": "LG Channels",
         "tcl-playlist-generator": "TCL TV+",
         "distro-playlist-generator": "DistroTV",
         "RakutenTV": "Rakuten TV",
@@ -393,9 +386,11 @@ def clean_service_name(repo):
         "pluto": "Pluto TV",
         "plex": "Plex",
         "buddylive": "BuddyLive",
-        "buddylive_v2": "BuddyLive V2",
+        "buddylive_v2": "BuddyLive",
         "buddylive-combined": "BuddyLive",
         "My-Streams": "My Streams",
+        "sports": "Sports",
+        "nz": "NZ",
     }
 
     if repo in known:
@@ -513,139 +508,131 @@ def normalize_text(value):
     return value.strip()
 
 
-# ============================================================
-# ORIGINAL GROUP
-# ============================================================
+def normalize_country(value):
 
-def extract_original_group(extinf):
-
-    group = get_attribute(
-        extinf,
-        "group-title"
+    value = normalize_text(
+        value
     )
 
-    if not group:
-        return ""
+    compact = value.replace(
+        " ",
+        ""
+    )
 
-    return group.strip()
+    if value in COUNTRIES:
+        return COUNTRIES[value]
+
+    if compact in COUNTRIES:
+        return COUNTRIES[compact]
+
+    return ""
 
 
 # ============================================================
-# GROUP HANDLING
+# EXPLICIT REGION ONLY
 # ============================================================
 
-def simplify_group(group):
+def region_from_filename(path):
 
-    if not group:
-        return "General"
+    stem = PurePosixPath(path).stem
 
-    group = group.strip()
-
-    # Preserve multi-level groups exactly.
+    # Only inspect the filename itself.
     #
     # Examples:
     #
-    # News | US
-    # Entertainment | Movies
-    # Sports | Football
+    # plex_us.m3u       -> US
+    # plex_gb.m3u       -> UK
+    # samsungtvplus_de  -> Germany
     #
-    # are NOT flattened.
-    #
-    # Only duplicated separators are cleaned.
+    # No channel-name guessing.
 
-    group = re.sub(
-        r"\s*\|\s*",
-        " | ",
-        group
+    tokens = re.split(
+        r"[^a-zA-Z]+",
+        stem
     )
 
-    group = re.sub(
-        r"\s*>\s*",
-        " > ",
-        group
-    )
+    for token in reversed(tokens):
 
-    group = re.sub(
-        r"\s+",
-        " ",
-        group
-    )
+        country = normalize_country(
+            token
+        )
 
-    return group.strip(
-        " |>"
-    ) or "General"
+        if country:
+            return country
+
+    return ""
 
 
-def choose_group(
+def region_from_metadata(extinf):
+
+    # Explicit country/region attributes only.
+
+    for attr in (
+        "country",
+        "region",
+        "tvg-country",
+        "country-code",
+        "iso_country",
+    ):
+
+        value = get_attribute(
+            extinf,
+            attr
+        )
+
+        country = normalize_country(
+            value
+        )
+
+        if country:
+            return country
+
+    return ""
+
+
+def determine_region(
     extinf,
-    path,
-    service
+    path
 ):
 
-    original = extract_original_group(
+    # ========================================================
+    # PRIORITY 1:
+    # Explicit metadata in the channel.
+    # ========================================================
+
+    region = region_from_metadata(
         extinf
     )
 
+    if region:
+        return region
+
     # ========================================================
-    # MOST IMPORTANT RULE:
+    # PRIORITY 2:
+    # Explicit region in playlist filename.
+    # ========================================================
+
+    region = region_from_filename(
+        path
+    )
+
+    if region:
+        return region
+
+    # ========================================================
+    # IMPORTANT:
     #
-    # If source already supplies group-title,
-    # KEEP IT.
+    # NO GUESSING.
+    #
+    # If the playlist is "all" and there is no explicit
+    # region metadata, the whole playlist stays ALL.
     # ========================================================
 
-    if original:
-
-        return simplify_group(
-            original
-        )
-
-    # ========================================================
-    # If source has NO group-title,
-    # use a simple fallback.
-    # ========================================================
-
-    filename = (
-        PurePosixPath(path)
-        .stem
-    )
-
-    filename = re.sub(
-        r"[_\-]+",
-        " ",
-        filename
-    )
-
-    filename = re.sub(
-        r"\s+",
-        " ",
-        filename
-    ).strip()
-
-    lower = filename.lower()
-
-    if lower in {
-        "all",
-        "playlist",
-        "combined playlist",
-        "combined",
-        "tv",
-        "videoall",
-    }:
-
-        return service
-
-    if filename:
-
-        return (
-            f"{service} | "
-            f"{filename}"
-        )
-
-    return service
+    return "All"
 
 
 # ============================================================
-# M3U PARSER
+# PARSE M3U
 # ============================================================
 
 def parse_m3u(text):
@@ -727,31 +714,13 @@ def parse_previous_output():
             encoding="utf-8"
         ) as file:
 
-            text = file.read()
-
-        return parse_m3u(
-            text
-        )
+            return parse_m3u(
+                file.read()
+            )
 
     except Exception:
 
         return []
-
-
-def get_previous_service(extinf):
-
-    group = get_attribute(
-        extinf,
-        "group-title"
-    )
-
-    if not group:
-        return ""
-
-    return group.split(
-        "|",
-        1
-    )[0].strip()
 
 
 # ============================================================
@@ -762,8 +731,20 @@ def main():
 
     print()
     print("=" * 70)
-    print("FAST ALL REGIONS - CLEAN GROUP BUILDER")
+    print("FAST ALL REGIONS - FINAL BUILDER")
     print("=" * 70)
+
+    print(
+        "Region detection: EXPLICIT ONLY"
+    )
+
+    print(
+        "Category format: SERVICE | REGION"
+    )
+
+    print(
+        "Channel-name region guessing: DISABLED"
+    )
 
     repositories = (
         get_all_repositories()
@@ -774,37 +755,13 @@ def main():
         f"{len(repositories)}"
     )
 
-    previous_entries = (
-        parse_previous_output()
-    )
-
-    previous_by_service = defaultdict(list)
-
-    for extinf, url in previous_entries:
-
-        service = get_previous_service(
-            extinf
-        )
-
-        if service:
-
-            previous_by_service[
-                service
-            ].append(
-                (
-                    extinf,
-                    url
-                )
-            )
-
     all_entries = []
-
     failed_files = []
 
     repository_stats = {}
 
     # ========================================================
-    # DISCOVER ALL REPOSITORIES
+    # REPOSITORIES
     # ========================================================
 
     for repo_info in repositories:
@@ -878,6 +835,14 @@ def main():
                     entries
                 )
 
+                # Region defined by the playlist itself.
+                file_region = (
+                    determine_region(
+                        "",
+                        path
+                    )
+                )
+
                 for extinf, stream_url in entries:
 
                     stream_url = (
@@ -887,10 +852,22 @@ def main():
                     if not stream_url:
                         continue
 
-                    final_group = choose_group(
-                        extinf,
-                        path,
-                        service
+                    # Metadata may explicitly define a region
+                    # inside an otherwise "all" playlist.
+                    metadata_region = (
+                        region_from_metadata(
+                            extinf
+                        )
+                    )
+
+                    region = (
+                        metadata_region
+                        or file_region
+                    )
+
+                    final_group = (
+                        f"{service} | "
+                        f"{region}"
                     )
 
                     new_extinf = (
@@ -905,7 +882,7 @@ def main():
                             "extinf": new_extinf,
                             "url": stream_url,
                             "service": service,
-                            "group": final_group,
+                            "region": region,
                             "name": (
                                 get_channel_name(
                                     extinf
@@ -940,69 +917,17 @@ def main():
             "channels": repo_channels,
         }
 
-        # ========================================================
-        # FALLBACK ONLY IF ENTIRE REPO FAILED
-        # ========================================================
-
-        if (
-            len(playlist_paths) > 0
-            and successful_files == 0
-        ):
-
-            old_entries = (
-                previous_by_service.get(
-                    service,
-                    []
-                )
-            )
-
-            if old_entries:
-
-                print(
-                    f"  [FALLBACK] "
-                    f"Keeping "
-                    f"{len(old_entries)} "
-                    f"previous entries for "
-                    f"{service}"
-                )
-
-                for extinf, url in old_entries:
-
-                    group = (
-                        get_attribute(
-                            extinf,
-                            "group-title"
-                        )
-                        or service
-                    )
-
-                    all_entries.append(
-                        {
-                            "extinf": extinf,
-                            "url": url.strip(),
-                            "service": service,
-                            "group": group,
-                            "name": (
-                                get_channel_name(
-                                    extinf
-                                )
-                            ),
-                        }
-                    )
-
     # ========================================================
     # DEDUPLICATION
     # ========================================================
 
     print()
     print(
-        "Removing duplicate streams..."
+        "Removing exact duplicate streams..."
     )
 
-    seen = set()
-
+    seen_urls = set()
     unique_entries = []
-
     duplicate_count = 0
 
     for entry in all_entries:
@@ -1013,35 +938,14 @@ def main():
             .lower()
         )
 
-        name_key = normalize_text(
-            entry["name"]
-        )
-
-        group_key = normalize_text(
-            entry["group"]
-        )
-
-        # IMPORTANT:
-        #
-        # Same stream + same channel name
-        # = duplicate.
-        #
-        # Group is NOT used to keep duplicates alive.
-        #
-
-        dedup_key = (
-            url_key,
-            name_key,
-        )
-
-        if dedup_key in seen:
+        if url_key in seen_urls:
 
             duplicate_count += 1
 
             continue
 
-        seen.add(
-            dedup_key
+        seen_urls.add(
+            url_key
         )
 
         unique_entries.append(
@@ -1058,7 +962,7 @@ def main():
                 item["service"]
             ),
             normalize_text(
-                item["group"]
+                item["region"]
             ),
             normalize_text(
                 item["name"]
@@ -1067,7 +971,7 @@ def main():
     )
 
     # ========================================================
-    # WRITE OUTPUT
+    # WRITE
     # ========================================================
 
     with open(
@@ -1102,7 +1006,8 @@ def main():
     for entry in unique_entries:
 
         groups[
-            entry["group"]
+            f"{entry['service']} | "
+            f"{entry['region']}"
         ] += 1
 
     # ========================================================
@@ -1130,12 +1035,12 @@ def main():
     )
 
     print(
-        f"Duplicates removed: "
+        f"Exact duplicate URLs removed: "
         f"{duplicate_count}"
     )
 
     print(
-        f"Unique groups: "
+        f"Final categories: "
         f"{len(groups)}"
     )
 
@@ -1146,15 +1051,19 @@ def main():
 
     print()
     print(
-        "Group structure: ORIGINAL SOURCE"
+        "Category format: SERVICE | REGION"
     )
 
     print(
-        "Artificial country grouping: DISABLED"
+        "Original group-title: NOT USED"
     )
 
     print(
-        "Artificial service grouping: DISABLED"
+        "Region guessing: DISABLED"
+    )
+
+    print(
+        "All playlists without explicit region: All"
     )
 
     print(
@@ -1163,10 +1072,6 @@ def main():
 
     print(
         "Offline/temporary streams: KEPT"
-    )
-
-    print(
-        "Repository discovery: DYNAMIC"
     )
 
     # ========================================================
@@ -1195,24 +1100,23 @@ def main():
         )
 
     # ========================================================
-    # TOP GROUPS
+    # CATEGORY SUMMARY
     # ========================================================
 
     print()
     print(
-        "TOP GROUPS"
+        "CATEGORY SUMMARY"
     )
     print(
         "-" * 70
     )
 
-    top_groups = sorted(
+    for group, count in sorted(
         groups.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    for group, count in top_groups[:50]:
+        key=lambda x: (
+            normalize_text(x[0])
+        )
+    ):
 
         print(
             f"{count:5d}  {group}"
