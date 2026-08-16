@@ -23,6 +23,8 @@ jobs:
           python-version: "3.12"
 
       - name: Build playlist
+      env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/merge_playlists.py
 
