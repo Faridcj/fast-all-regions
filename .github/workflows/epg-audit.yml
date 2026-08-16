@@ -20,7 +20,6 @@ concurrency:
 jobs:
   epg:
 
-    # فقط اگر Update FAST All Regions با موفقیت تمام شده باشد
     if: >
       github.event_name == 'workflow_dispatch' ||
       (
@@ -203,7 +202,9 @@ jobs:
                           / f"{name}.xml"
                       )
 
-                      output.write_bytes(data)
+                      output.write_bytes(
+                          data
+                      )
 
 
                       print(
@@ -356,12 +357,13 @@ jobs:
 
 
           # ==================================================
-          # Read current M3U
+          # Read M3U
           # ==================================================
 
           print("=" * 70)
           print("READING M3U")
           print("=" * 70)
+
 
           if not M3U_FILE.exists():
 
@@ -392,11 +394,13 @@ jobs:
                   re.I
               )
 
+
               if match:
 
                   value = match.group(1).strip()
 
                   if value:
+
                       wanted_ids.add(value)
 
 
@@ -407,10 +411,15 @@ jobs:
                       1
                   )[1].strip()
 
-                  normalized = normalize(name)
+                  normalized = normalize(
+                      name
+                  )
 
                   if normalized:
-                      wanted_names.add(normalized)
+
+                      wanted_names.add(
+                          normalized
+                      )
 
 
           print(
@@ -432,10 +441,12 @@ jobs:
               timezone.utc
           )
 
+
           minimum_time = (
               now -
               timedelta(days=7)
           )
+
 
           maximum_time = (
               now +
@@ -444,13 +455,17 @@ jobs:
 
 
           # ==================================================
-          # Build XMLTV
+          # XML root
           # ==================================================
 
-          root = ET.Element("tv")
+          root = ET.Element(
+              "tv"
+          )
+
 
           seen_channels = set()
           seen_programmes = set()
+
 
           matched_channels = 0
           kept_programmes = 0
@@ -459,20 +474,32 @@ jobs:
           future_programmes = 0
 
 
+          # ==================================================
+          # Process sources
+          # ==================================================
+
           for file in sorted(
               SOURCE_DIR.glob("*.xml")
           ):
 
               print("")
               print("=" * 70)
-              print("PROCESSING:", file)
+              print(
+                  "PROCESSING:",
+                  file
+              )
               print("=" * 70)
 
 
               try:
 
-                  tree = ET.parse(file)
-                  source_root = tree.getroot()
+                  tree = ET.parse(
+                      file
+                  )
+
+                  source_root = (
+                      tree.getroot()
+                  )
 
               except Exception as exc:
 
@@ -487,21 +514,25 @@ jobs:
               matching_ids = set()
 
 
-              # ----------------------------------------------
+              # ------------------------------------------------
               # Channels
-              # ----------------------------------------------
+              # ------------------------------------------------
 
               for channel in source_root.findall(
                   ".//channel"
               ):
 
-                  cid = channel.get("id")
+                  cid = channel.get(
+                      "id"
+                  )
+
 
                   if not cid:
                       continue
 
 
                   names = []
+
 
                   for display in channel.findall(
                       "display-name"
@@ -520,40 +551,52 @@ jobs:
 
 
                   if cid in wanted_ids:
+
                       matched = True
 
 
                   if (
                       not matched
                       and
-                      set(names) & wanted_names
+                      set(names) &
+                      wanted_names
                   ):
 
                       matched = True
 
 
                   if not matched:
+
                       continue
 
 
-                  matching_ids.add(cid)
+                  matching_ids.add(
+                      cid
+                  )
 
 
                   if cid in seen_channels:
+
                       continue
 
 
-                  seen_channels.add(cid)
+                  seen_channels.add(
+                      cid
+                  )
 
 
                   new_channel = ET.Element(
                       "channel",
-                      {"id": cid}
+                      {
+                          "id": cid
+                      }
                   )
 
 
-                  display = channel.find(
-                      "display-name"
+                  display = (
+                      channel.find(
+                          "display-name"
+                      )
                   )
 
 
@@ -568,19 +611,22 @@ jobs:
                           "display-name"
                       )
 
-                      d.text = display.text.strip()
+                      d.text = (
+                          display.text.strip()
+                      )
 
 
                   root.append(
                       new_channel
                   )
 
+
                   matched_channels += 1
 
 
-              # ----------------------------------------------
+              # ------------------------------------------------
               # Programmes
-              # ----------------------------------------------
+              # ------------------------------------------------
 
               for programme in source_root.findall(
                   ".//programme"
@@ -590,13 +636,16 @@ jobs:
                       "channel"
                   )
 
+
                   if cid not in matching_ids:
+
                       continue
 
 
                   start_raw = programme.get(
                       "start"
                   )
+
 
                   stop_raw = programme.get(
                       "stop"
@@ -609,18 +658,21 @@ jobs:
 
 
                   if start is None:
+
                       continue
 
 
                   if start < minimum_time:
 
                       old_programmes += 1
+
                       continue
 
 
                   if start > maximum_time:
 
                       future_programmes += 1
+
                       continue
 
 
@@ -638,10 +690,13 @@ jobs:
                       continue
 
 
-                  title_text = title.text.strip()
+                  title_text = (
+                      title.text.strip()
+                  )
 
 
                   if not title_text:
+
                       continue
 
 
@@ -653,9 +708,14 @@ jobs:
                   )
 
 
-                  if duplicate_key in seen_programmes:
+                  if (
+                      duplicate_key
+                      in
+                      seen_programmes
+                  ):
 
                       duplicate_programmes += 1
+
                       continue
 
 
@@ -671,6 +731,7 @@ jobs:
 
 
                   if stop_raw:
+
                       attrs["stop"] = stop_raw
 
 
@@ -685,27 +746,34 @@ jobs:
                       "title"
                   )
 
-                  new_title.text = title_text
+
+                  new_title.text = (
+                      title_text
+                  )
 
 
                   root.append(
                       new_programme
                   )
 
+
                   kept_programmes += 1
 
 
           # ==================================================
-          # Write
+          # Write XML
           # ==================================================
 
           print("")
           print("=" * 70)
-          print("WRITING EPG")
+          print("WRITING OPTIMIZED EPG")
           print("=" * 70)
 
 
-          tree = ET.ElementTree(root)
+          tree = ET.ElementTree(
+              root
+          )
+
 
           tree.write(
               OUTPUT,
@@ -740,6 +808,7 @@ jobs:
               / 1024
           )
 
+
           gzip_size = (
               GZIP_OUTPUT.stat().st_size
               / 1024
@@ -749,43 +818,56 @@ jobs:
 
           print("")
           print("=" * 70)
-          print("FINAL EPG")
+          print("FINAL RESULT")
           print("=" * 70)
+
 
           print(
               "Channels:",
               matched_channels
           )
 
+
           print(
               "Programmes:",
               kept_programmes
           )
+
 
           print(
               "Duplicates removed:",
               duplicate_programmes
           )
 
+
           print(
               "Old removed:",
               old_programmes
           )
+
 
           print(
               "Future removed:",
               future_programmes
           )
 
+
           print(
               "XML:",
-              round(xml_size, 2),
+              round(
+                  xml_size,
+                  2
+              ),
               "MB"
           )
 
+
           print(
               "GZIP:",
-              round(gzip_size, 2),
+              round(
+                  gzip_size,
+                  2
+              ),
               "MB"
           )
 
@@ -795,7 +877,7 @@ jobs:
 
 
       # ==================================================
-      # 5. Validate
+      # 5. Validate EPG
       # ==================================================
 
       - name: Validate EPG
@@ -805,44 +887,188 @@ jobs:
 
           import xml.etree.ElementTree as ET
 
-          tree = ET.parse("epg.xml")
+
+          file = "epg.xml"
+
+
+          tree = ET.parse(
+              file
+          )
+
 
           root = tree.getroot()
 
-          channels = root.findall(".//channel")
-          programmes = root.findall(".//programme")
+
+          channels = root.findall(
+              ".//channel"
+          )
 
 
-          print("Root:", root.tag)
-          print("Channels:", len(channels))
-          print("Programmes:", len(programmes))
+          programmes = root.findall(
+              ".//programme"
+          )
+
+
+          print("")
+          print("=" * 70)
+          print("EPG VALIDATION")
+          print("=" * 70)
+
+
+          print(
+              "Root:",
+              root.tag
+          )
+
+
+          print(
+              "Channels:",
+              len(channels)
+          )
+
+
+          print(
+              "Programmes:",
+              len(programmes)
+          )
 
 
           if root.tag != "tv":
+
               raise SystemExit(
                   "INVALID XMLTV ROOT"
               )
 
 
           if not channels:
+
               raise SystemExit(
                   "NO CHANNELS FOUND"
               )
 
 
           if not programmes:
+
               raise SystemExit(
                   "NO PROGRAMMES FOUND"
               )
 
 
-          print("EPG XML VALID")
+          print(
+              "EPG XML VALID"
+          )
 
           PY
 
 
       # ==================================================
-      # 6. Publish EPG
+      # 6. Create EPG audit report
+      # ==================================================
+
+      - name: Create EPG audit report
+        run: |
+
+          python - <<'PY'
+
+          import xml.etree.ElementTree as ET
+
+          from pathlib import Path
+
+
+          file = Path(
+              "epg.xml"
+          )
+
+
+          tree = ET.parse(
+              file
+          )
+
+
+          root = tree.getroot()
+
+
+          channels = root.findall(
+              ".//channel"
+          )
+
+
+          programmes = root.findall(
+              ".//programme"
+          )
+
+
+          lines = []
+
+
+          lines.append(
+              "EPG AUDIT REPORT"
+          )
+
+
+          lines.append(
+              "=" * 60
+          )
+
+
+          lines.append(
+              f"Channels: {len(channels)}"
+          )
+
+
+          lines.append(
+              f"Programmes: {len(programmes)}"
+          )
+
+
+          lines.append(
+              f"EPG XML size: {file.stat().st_size} bytes"
+          )
+
+
+          if root.tag != "tv":
+
+              raise SystemExit(
+                  "Invalid XMLTV root"
+              )
+
+
+          if not channels:
+
+              raise SystemExit(
+                  "No channels found"
+              )
+
+
+          if not programmes:
+
+              raise SystemExit(
+                  "No programmes found"
+              )
+
+
+          lines.append(
+              "Status: VALID"
+          )
+
+
+          Path(
+              "epg-audit.txt"
+          ).write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8"
+          )
+
+
+          print(
+              "\n".join(lines)
+          )
+
+          PY
+
+
+      # ==================================================
+      # 7. Publish EPG
       # ==================================================
 
       - name: Publish EPG XML
@@ -850,17 +1076,22 @@ jobs:
 
           mkdir -p public
 
-          cp epg.xml public/epg.xml
+
+          cp \
+            epg.xml \
+            public/epg.xml
 
 
           git config user.name \
             "github-actions[bot]"
 
+
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
 
-          git add public/epg.xml
+          git add \
+            public/epg.xml
 
 
           if git diff --cached --quiet; then
@@ -872,9 +1103,12 @@ jobs:
             git commit \
               -m "Update EPG XML"
 
+
             git fetch origin main
 
+
             git rebase origin/main
+
 
             git push origin HEAD:main
 
@@ -882,7 +1116,7 @@ jobs:
 
 
       # ==================================================
-      # 7. Upload XML
+      # 8. Upload EPG XML
       # ==================================================
 
       - name: Upload EPG XML
@@ -895,7 +1129,7 @@ jobs:
 
 
       # ==================================================
-      # 8. Upload GZIP
+      # 9. Upload compressed EPG
       # ==================================================
 
       - name: Upload compressed EPG
@@ -908,7 +1142,7 @@ jobs:
 
 
       # ==================================================
-      # 9. Upload audit
+      # 10. Upload audit report
       # ==================================================
 
       - name: Upload EPG audit
