@@ -1,32 +1,16 @@
 import json
 import os
 import re
-import time
-import base64
 import urllib.request
-import urllib.error
 from urllib.parse import quote, unquote
 from pathlib import PurePosixPath
 from collections import defaultdict
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
 OWNER = "BuddyChewChew"
 OUTPUT = "fast-all-regions.m3u"
 
-# GitHub repository where the final M3U is uploaded
-UPLOAD_REPOSITORY = "faridcj/fast-all-regions"
-UPLOAD_PATH = "fast-all-regions.m3u"
-UPLOAD_BRANCH = "main"
-
 REQUEST_TIMEOUT = 90
 
-# IMPORTANT:
-# Your GitHub token is read from the environment.
-# NEVER put the real token directly in this file.
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
 API_HEADERS = {
@@ -34,14 +18,13 @@ API_HEADERS = {
     "User-Agent": "FAST-All-Regions-Builder",
 }
 
+if GITHUB_TOKEN:
+    API_HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 FAST-All-Regions-Builder",
+    "Accept": "*/*",
 }
-
-
-# ============================================================
-# PLAYLIST SETTINGS
-# ============================================================
 
 PLAYLIST_EXTENSIONS = (
     ".m3u",
@@ -64,10 +47,6 @@ IGNORE_PARTS = {
 }
 
 
-# ============================================================
-# COUNTRY / REGION MAP
-# ============================================================
-
 COUNTRIES = {
     "us": "US",
     "usa": "US",
@@ -87,234 +66,124 @@ COUNTRIES = {
 
     "ca": "Canada",
     "canada": "Canada",
-
     "au": "Australia",
     "australia": "Australia",
-
     "nz": "New Zealand",
     "new-zealand": "New Zealand",
     "new_zealand": "New Zealand",
-
     "de": "Germany",
     "germany": "Germany",
-
     "fr": "France",
     "france": "France",
-
     "es": "Spain",
     "spain": "Spain",
-
     "it": "Italy",
     "italy": "Italy",
-
     "br": "Brazil",
     "brazil": "Brazil",
-
     "mx": "Mexico",
     "mexico": "Mexico",
-
     "in": "India",
     "india": "India",
-
     "jp": "Japan",
     "japan": "Japan",
-
     "kr": "South Korea",
     "korea": "South Korea",
     "south-korea": "South Korea",
     "south_korea": "South Korea",
-
     "at": "Austria",
     "austria": "Austria",
-
     "ch": "Switzerland",
     "switzerland": "Switzerland",
-
     "nl": "Netherlands",
     "netherlands": "Netherlands",
-
     "se": "Sweden",
     "sweden": "Sweden",
-
     "no": "Norway",
     "norway": "Norway",
-
     "dk": "Denmark",
     "denmark": "Denmark",
-
     "fi": "Finland",
     "finland": "Finland",
-
     "pl": "Poland",
     "poland": "Poland",
-
     "tr": "Turkey",
     "turkey": "Turkey",
-
     "ie": "Ireland",
     "ireland": "Ireland",
-
     "za": "South Africa",
     "south-africa": "South Africa",
     "south_africa": "South Africa",
     "southafrica": "South Africa",
-
     "ar": "Argentina",
     "argentina": "Argentina",
-
     "cl": "Chile",
     "chile": "Chile",
-
     "co": "Colombia",
     "colombia": "Colombia",
-
     "pe": "Peru",
     "peru": "Peru",
-
     "pt": "Portugal",
     "portugal": "Portugal",
-
     "gr": "Greece",
     "greece": "Greece",
-
     "il": "Israel",
     "israel": "Israel",
-
     "ph": "Philippines",
     "philippines": "Philippines",
-
     "sg": "Singapore",
     "singapore": "Singapore",
-
     "my": "Malaysia",
     "malaysia": "Malaysia",
-
     "th": "Thailand",
     "thailand": "Thailand",
-
     "hk": "Hong Kong",
     "hong-kong": "Hong Kong",
     "hong_kong": "Hong Kong",
-
     "tw": "Taiwan",
     "taiwan": "Taiwan",
 }
 
 
-# ============================================================
-# HTTP HELPERS
-# ============================================================
-
-def fetch_bytes(url, headers=None, retries=3):
-
+def fetch_bytes(url, headers=None):
     headers = headers or HTTP_HEADERS
 
-    last_error = None
-
-    for attempt in range(1, retries + 1):
-
-        try:
-
-            request = urllib.request.Request(
-                url,
-                headers=headers
-            )
-
-            with urllib.request.urlopen(
-                request,
-                timeout=REQUEST_TIMEOUT
-            ) as response:
-
-                return response.read()
-
-        except urllib.error.HTTPError as error:
-
-            last_error = error
-
-            if error.code == 429 or error.code == 403:
-
-                retry_after = error.headers.get(
-                    "Retry-After"
-                )
-
-                if retry_after:
-                    try:
-                        wait = int(retry_after)
-                    except ValueError:
-                        wait = 10
-                else:
-                    wait = min(
-                        10 * attempt,
-                        60
-                    )
-
-                print(
-                    f"    [RETRY] HTTP {error.code}; "
-                    f"waiting {wait}s..."
-                )
-
-                time.sleep(wait)
-
-                continue
-
-            raise
-
-        except Exception as error:
-
-            last_error = error
-
-            if attempt < retries:
-
-                wait = min(
-                    3 * attempt,
-                    15
-                )
-
-                time.sleep(wait)
-
-            else:
-                raise
-
-    raise last_error
-
-
-def fetch_text(url, headers=None, retries=3):
-
-    return fetch_bytes(
+    request = urllib.request.Request(
         url,
-        headers,
-        retries
-    ).decode(
+        headers=headers
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=REQUEST_TIMEOUT
+    ) as response:
+        return response.read()
+
+
+def fetch_text(url, headers=None):
+    return fetch_bytes(url, headers).decode(
         "utf-8",
         errors="replace"
     )
 
 
 def github_json(url):
-
     return json.loads(
         fetch_text(
             url,
-            API_HEADERS,
-            retries=4
+            API_HEADERS
         )
     )
 
 
-# ============================================================
-# GITHUB API
-# ============================================================
-
 def get_all_repositories():
-
     repositories = []
     page = 1
 
     while True:
-
         url = (
             f"https://api.github.com/users/"
-            f"{OWNER}/repos"
+            f"{quote(OWNER, safe='')}/repos"
             f"?per_page=100"
             f"&page={page}"
             f"&type=public"
@@ -322,38 +191,31 @@ def get_all_repositories():
         )
 
         try:
-
             data = github_json(url)
 
         except Exception as error:
-
             print(
-                f"[ERROR] Cannot read repositories: "
-                f"{error}"
+                f"[ERROR] Cannot read repositories: {error}"
             )
-
             break
 
         if not data:
             break
 
         for repo in data:
-
             if repo.get("fork"):
                 continue
 
             if repo.get("archived"):
                 continue
 
-            repositories.append(
-                {
-                    "name": repo["name"],
-                    "default_branch": (
-                        repo.get("default_branch")
-                        or "main"
-                    ),
-                }
-            )
+            repositories.append({
+                "name": repo["name"],
+                "default_branch": (
+                    repo.get("default_branch")
+                    or "main"
+                ),
+            })
 
         if len(data) < 100:
             break
@@ -364,52 +226,36 @@ def get_all_repositories():
 
 
 def get_repository_tree(repo, branch):
-
     url = (
         f"https://api.github.com/repos/"
-        f"{OWNER}/{quote(repo, safe='')}"
-        f"/git/trees/"
+        f"{quote(OWNER, safe='')}/"
+        f"{quote(repo, safe='')}/git/trees/"
         f"{quote(branch, safe='/')}"
         f"?recursive=1"
     )
 
     try:
-
         data = github_json(url)
 
         if data.get("truncated"):
-
             print(
-                f"[WARNING] GitHub tree is truncated: "
-                f"{repo}"
+                f"[WARNING] GitHub tree is truncated: {repo}"
             )
 
-        return data.get(
-            "tree",
-            []
-        )
+        return data.get("tree", [])
 
     except Exception as error:
-
         print(
             f"[WARNING] Cannot read tree "
             f"{repo}: {error}"
         )
-
         return []
 
 
-# ============================================================
-# PLAYLIST DISCOVERY
-# ============================================================
-
 def is_playlist(path):
-
     lower = path.lower()
 
-    if not lower.endswith(
-        PLAYLIST_EXTENSIONS
-    ):
+    if not lower.endswith(PLAYLIST_EXTENSIONS):
         return False
 
     parts = {
@@ -417,47 +263,30 @@ def is_playlist(path):
         for p in PurePosixPath(path).parts
     }
 
-    if parts.intersection(
-        IGNORE_PARTS
-    ):
+    if parts.intersection(IGNORE_PARTS):
         return False
 
     return True
 
 
 def discover_playlists(repo, branch):
-
-    tree = get_repository_tree(
-        repo,
-        branch
-    )
+    tree = get_repository_tree(repo, branch)
 
     result = []
 
     for item in tree:
-
         if item.get("type") != "blob":
             continue
 
-        path = item.get(
-            "path",
-            ""
-        )
+        path = item.get("path", "")
 
-        if not is_playlist(path):
-            continue
-
-        result.append(path)
+        if is_playlist(path):
+            result.append(path)
 
     return sorted(result)
 
 
-# ============================================================
-# SERVICE NAME
-# ============================================================
-
 def clean_service_name(repo):
-
     known = {
         "app-m3u-generator": "FAST Apps",
         "plex-alt-fast-channels": "Plex Alt",
@@ -479,11 +308,7 @@ def clean_service_name(repo):
     if repo in known:
         return known[repo]
 
-    name = re.sub(
-        r"[-_]+",
-        " ",
-        repo
-    )
+    name = re.sub(r"[-_]+", " ", repo)
 
     name = re.sub(
         r"\bplaylist generator\b",
@@ -499,21 +324,12 @@ def clean_service_name(repo):
         flags=re.IGNORECASE
     )
 
-    name = re.sub(
-        r"\s+",
-        " ",
-        name
-    ).strip()
+    name = re.sub(r"\s+", " ", name).strip()
 
     return name.title()
 
 
-# ============================================================
-# M3U ATTRIBUTES
-# ============================================================
-
 def get_attribute(extinf, attribute):
-
     pattern = (
         rf'{re.escape(attribute)}='
         r'"([^"]*)"'
@@ -532,7 +348,6 @@ def get_attribute(extinf, attribute):
 
 
 def replace_group_title(extinf, group):
-
     escaped_group = (
         group
         .replace("\\", "\\\\")
@@ -544,7 +359,6 @@ def replace_group_title(extinf, group):
         extinf,
         re.IGNORECASE
     ):
-
         return re.sub(
             r'group-title="[^"]*"',
             f'group-title="{escaped_group}"',
@@ -564,16 +378,8 @@ def replace_group_title(extinf, group):
     )
 
 
-# ============================================================
-# NORMALIZATION
-# ============================================================
-
 def normalize_text(value):
-
-    value = unquote(
-        value or ""
-    )
-
+    value = unquote(value or "")
     value = value.lower()
 
     value = re.sub(
@@ -592,15 +398,8 @@ def normalize_text(value):
 
 
 def normalize_country(value):
-
-    value = normalize_text(
-        value
-    )
-
-    compact = value.replace(
-        " ",
-        ""
-    )
+    value = normalize_text(value)
+    compact = value.replace(" ", "")
 
     if value in COUNTRIES:
         return COUNTRIES[value]
@@ -611,16 +410,7 @@ def normalize_country(value):
     return ""
 
 
-# ============================================================
-# COUNTRY DETECTION
-# ============================================================
-
-def detect_country(
-    extinf,
-    path,
-    service
-):
-
+def detect_country(extinf, path, service):
     for attr in (
         "country",
         "region",
@@ -628,15 +418,9 @@ def detect_country(
         "country-code",
         "iso_country",
     ):
+        value = get_attribute(extinf, attr)
 
-        value = get_attribute(
-            extinf,
-            attr
-        )
-
-        country = normalize_country(
-            value
-        )
+        country = normalize_country(value)
 
         if country:
             return country
@@ -653,10 +437,7 @@ def detect_country(
     )
 
     for token in tokens:
-
-        country = normalize_country(
-            token
-        )
+        country = normalize_country(token)
 
         if country:
             return country
@@ -667,17 +448,13 @@ def detect_country(
     )
 
     if original_group:
-
         pieces = re.split(
             r"[|>/,;:]+",
             original_group
         )
 
         for piece in pieces:
-
-            country = normalize_country(
-                piece
-            )
+            country = normalize_country(piece)
 
             if country:
                 return country
@@ -688,15 +465,11 @@ def detect_country(
     )
 
     if tvgid:
-
         for token in re.split(
             r"[-_.:]+",
             tvgid
         ):
-
-            country = normalize_country(
-                token
-            )
+            country = normalize_country(token)
 
             if country:
                 return country
@@ -711,18 +484,10 @@ def detect_country(
         "Airy TV": "US",
     }
 
-    return defaults.get(
-        service,
-        "Global"
-    )
+    return defaults.get(service, "Global")
 
-
-# ============================================================
-# ORIGINAL GROUP
-# ============================================================
 
 def extract_original_group(extinf):
-
     group = get_attribute(
         extinf,
         "group-title"
@@ -733,18 +498,10 @@ def extract_original_group(extinf):
 
     group = group.strip()
 
-    if not group:
-        return "General"
+    return group or "General"
 
-    return group
-
-
-# ============================================================
-# M3U PARSER
-# ============================================================
 
 def parse_m3u(text):
-
     lines = (
         text
         .replace("\r\n", "\n")
@@ -753,20 +510,16 @@ def parse_m3u(text):
     )
 
     entries = []
-
     current_extinf = None
 
     for line in lines:
-
         line = line.strip()
 
         if not line:
             continue
 
         if line.startswith("#EXTINF:"):
-
             current_extinf = line
-
             continue
 
         if line.startswith("#"):
@@ -775,18 +528,11 @@ def parse_m3u(text):
         if (
             current_extinf
             and line.startswith(
-                (
-                    "http://",
-                    "https://"
-                )
+                ("http://", "https://")
             )
         ):
-
             entries.append(
-                (
-                    current_extinf,
-                    line
-                )
+                (current_extinf, line)
             )
 
             current_extinf = None
@@ -795,7 +541,6 @@ def parse_m3u(text):
 
 
 def get_channel_name(extinf):
-
     if "," not in extinf:
         return ""
 
@@ -806,33 +551,22 @@ def get_channel_name(extinf):
     )
 
 
-# ============================================================
-# PREVIOUS OUTPUT
-# ============================================================
-
 def parse_previous_output():
-
     try:
-
         with open(
             OUTPUT,
             "r",
             encoding="utf-8"
         ) as file:
-
             text = file.read()
 
-        return parse_m3u(
-            text
-        )
+        return parse_m3u(text)
 
     except Exception:
-
         return []
 
 
 def get_previous_service(extinf):
-
     group = get_attribute(
         extinf,
         "group-title"
@@ -847,251 +581,55 @@ def get_previous_service(extinf):
     )[0].strip()
 
 
-# ============================================================
-# GITHUB UPLOAD
-# ============================================================
-
-def upload_to_github():
-
-    if not GITHUB_TOKEN:
-
-        print()
-        print(
-            "[ERROR] GITHUB_TOKEN is not set."
-        )
-
-        print(
-            "Set it before running the script."
-        )
-
-        print(
-            'PowerShell example:'
-        )
-
-        print(
-            '$env:GITHUB_TOKEN="YOUR_TOKEN"'
-        )
-
-        return False
-
-    try:
-
-        with open(
-            OUTPUT,
-            "rb"
-        ) as file:
-
-            content = file.read()
-
-    except Exception as error:
-
-        print(
-            f"[ERROR] Cannot read output file: "
-            f"{error}"
-        )
-
-        return False
-
-    encoded = base64.b64encode(
-        content
-    ).decode(
-        "ascii"
-    )
-
-    api_url = (
-        "https://api.github.com/repos/"
-        f"{UPLOAD_REPOSITORY}/contents/"
-        f"{quote(UPLOAD_PATH, safe='/')}"
-    )
-
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": (
-            f"Bearer {GITHUB_TOKEN}"
-        ),
-        "User-Agent": (
-            "FAST-All-Regions-Builder"
-        ),
-        "Content-Type": "application/json",
-    }
-
-    # --------------------------------------------------------
-    # Get existing file SHA
-    # --------------------------------------------------------
-
-    sha = None
-
-    try:
-
-        existing = json.loads(
-            fetch_text(
-                api_url
-                + f"?ref={quote(UPLOAD_BRANCH)}",
-                headers,
-                retries=3
-            )
-        )
-
-        sha = existing.get(
-            "sha"
-        )
-
-    except urllib.error.HTTPError as error:
-
-        if error.code != 404:
-
-            print(
-                f"[ERROR] Cannot check existing "
-                f"GitHub file: {error}"
-            )
-
-            return False
-
-    except Exception as error:
-
-        print(
-            f"[ERROR] Cannot check existing "
-            f"GitHub file: {error}"
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # Prepare upload
-    # --------------------------------------------------------
-
-    payload = {
-        "message": (
-            "Update fast-all-regions.m3u"
-        ),
-        "content": encoded,
-        "branch": UPLOAD_BRANCH,
-    }
-
-    if sha:
-        payload["sha"] = sha
-
-    data = json.dumps(
-        payload
-    ).encode(
-        "utf-8"
-    )
-
-    request = urllib.request.Request(
-        api_url,
-        data=data,
-        headers=headers,
-        method="PUT"
-    )
-
-    try:
-
-        with urllib.request.urlopen(
-            request,
-            timeout=REQUEST_TIMEOUT
-        ) as response:
-
-            response.read()
-
-        print()
-        print(
-            "[SUCCESS] M3U uploaded to GitHub."
-        )
-
-        print(
-            "Repository:"
-            f" {UPLOAD_REPOSITORY}"
-        )
-
-        print(
-            "File:"
-            f" {UPLOAD_PATH}"
-        )
-
-        print(
-            "Branch:"
-            f" {UPLOAD_BRANCH}"
-        )
-
-        return True
-
-    except Exception as error:
-
-        print()
-        print(
-            f"[ERROR] GitHub upload failed: "
-            f"{error}"
-        )
-
-        return False
-
-
-# ============================================================
-# BUILD
-# ============================================================
-
 def main():
-
     print()
     print("=" * 70)
     print("FAST ALL REGIONS - DYNAMIC BUILDER")
     print("=" * 70)
 
-    repositories = (
-        get_all_repositories()
-    )
+    if GITHUB_TOKEN:
+        print("GitHub API authentication: ENABLED")
+    else:
+        print(
+            "[WARNING] GITHUB_TOKEN not found - "
+            "using unauthenticated API"
+        )
+
+    repositories = get_all_repositories()
 
     print(
         f"Repositories discovered: "
         f"{len(repositories)}"
     )
 
-    previous_entries = (
-        parse_previous_output()
-    )
+    previous_entries = parse_previous_output()
 
     previous_by_service = defaultdict(list)
 
     for extinf, url in previous_entries:
-
-        service = get_previous_service(
-            extinf
-        )
+        service = get_previous_service(extinf)
 
         if service:
-
             previous_by_service[
                 service
             ].append(
-                (
-                    extinf,
-                    url
-                )
+                (extinf, url)
             )
 
     all_entries = []
     failed_files = []
     repository_stats = {}
 
-    # ========================================================
-    # DISCOVER ALL REPOSITORIES
-    # ========================================================
-
     for repo_info in repositories:
-
         repo = repo_info["name"]
         branch = repo_info["default_branch"]
 
         print()
-        print(
-            f"=== {repo} ==="
-        )
+        print(f"=== {repo} ===")
 
-        playlist_paths = (
-            discover_playlists(
-                repo,
-                branch
-            )
+        playlist_paths = discover_playlists(
+            repo,
+            branch
         )
 
         print(
@@ -1101,44 +639,30 @@ def main():
         )
 
         if not playlist_paths:
-
-            repository_stats[
-                repo
-            ] = {
+            repository_stats[repo] = {
                 "files": 0,
                 "successful": 0,
                 "channels": 0,
             }
-
             continue
 
-        service = clean_service_name(
-            repo
-        )
+        service = clean_service_name(repo)
 
         successful_files = 0
         repo_channels = 0
 
         for path in playlist_paths:
-
             raw_url = (
                 "https://raw.githubusercontent.com/"
-                f"{OWNER}/"
+                f"{quote(OWNER, safe='')}/"
                 f"{quote(repo, safe='')}/"
                 f"{quote(path, safe='/')}"
             )
 
             try:
+                text = fetch_text(raw_url)
 
-                text = fetch_text(
-                    raw_url,
-                    HTTP_HEADERS,
-                    retries=4
-                )
-
-                entries = parse_m3u(
-                    text
-                )
+                entries = parse_m3u(text)
 
                 print(
                     f"  {path}: "
@@ -1146,15 +670,10 @@ def main():
                 )
 
                 successful_files += 1
-                repo_channels += len(
-                    entries
-                )
+                repo_channels += len(entries)
 
                 for extinf, stream_url in entries:
-
-                    stream_url = (
-                        stream_url.strip()
-                    )
+                    stream_url = stream_url.strip()
 
                     if not stream_url:
                         continue
@@ -1184,25 +703,22 @@ def main():
                         )
                     )
 
-                    all_entries.append(
-                        {
-                            "extinf": new_extinf,
-                            "url": stream_url,
-                            "service": service,
-                            "country": country,
-                            "original_group": (
-                                original_group
-                            ),
-                            "name": (
-                                get_channel_name(
-                                    extinf
-                                )
-                            ),
-                        }
-                    )
+                    all_entries.append({
+                        "extinf": new_extinf,
+                        "url": stream_url,
+                        "service": service,
+                        "country": country,
+                        "original_group": (
+                            original_group
+                        ),
+                        "name": (
+                            get_channel_name(
+                                extinf
+                            )
+                        ),
+                    })
 
             except Exception as error:
-
                 print(
                     f"  [WARNING] "
                     f"{path} failed: "
@@ -1210,32 +726,19 @@ def main():
                 )
 
                 failed_files.append(
-                    (
-                        repo,
-                        path,
-                        str(error)
-                    )
+                    (repo, path, str(error))
                 )
 
-        repository_stats[
-            repo
-        ] = {
-            "files": len(
-                playlist_paths
-            ),
+        repository_stats[repo] = {
+            "files": len(playlist_paths),
             "successful": successful_files,
             "channels": repo_channels,
         }
-
-        # ====================================================
-        # FALLBACK
-        # ====================================================
 
         if (
             len(playlist_paths) > 0
             and successful_files == 0
         ):
-
             old_entries = (
                 previous_by_service.get(
                     service,
@@ -1244,52 +747,40 @@ def main():
             )
 
             if old_entries:
-
                 print(
-                    f"  [FALLBACK] "
-                    f"Keeping "
+                    f"  [FALLBACK] Keeping "
                     f"{len(old_entries)} "
                     f"previous entries for "
                     f"{service}"
                 )
 
                 for extinf, url in old_entries:
-
-                    all_entries.append(
-                        {
-                            "extinf": extinf,
-                            "url": url.strip(),
-                            "service": service,
-                            "country": "",
-                            "original_group": (
-                                get_attribute(
-                                    extinf,
-                                    "group-title"
-                                )
-                            ),
-                            "name": (
-                                get_channel_name(
-                                    extinf
-                                )
-                            ),
-                        }
-                    )
-
-    # ========================================================
-    # DEDUPLICATION
-    # ========================================================
+                    all_entries.append({
+                        "extinf": extinf,
+                        "url": url.strip(),
+                        "service": service,
+                        "country": "",
+                        "original_group": (
+                            get_attribute(
+                                extinf,
+                                "group-title"
+                            )
+                        ),
+                        "name": (
+                            get_channel_name(
+                                extinf
+                            )
+                        ),
+                    })
 
     print()
-    print(
-        "Removing duplicate streams..."
-    )
+    print("Removing duplicate streams...")
 
     seen = set()
     unique_entries = []
     duplicate_count = 0
 
     for entry in all_entries:
-
         url_key = (
             entry["url"]
             .strip()
@@ -1316,22 +807,11 @@ def main():
         )
 
         if dedup_key in seen:
-
             duplicate_count += 1
-
             continue
 
-        seen.add(
-            dedup_key
-        )
-
-        unique_entries.append(
-            entry
-        )
-
-    # ========================================================
-    # SORT
-    # ========================================================
+        seen.add(dedup_key)
+        unique_entries.append(entry)
 
     unique_entries.sort(
         key=lambda item: (
@@ -1350,36 +830,22 @@ def main():
         )
     )
 
-    # ========================================================
-    # WRITE LOCAL OUTPUT
-    # ========================================================
-
     with open(
         OUTPUT,
         "w",
         encoding="utf-8",
         newline="\n"
     ) as file:
-
-        file.write(
-            "#EXTM3U\n"
-        )
+        file.write("#EXTM3U\n")
 
         for entry in unique_entries:
-
             file.write(
-                entry["extinf"]
-                + "\n"
+                entry["extinf"] + "\n"
             )
 
             file.write(
-                entry["url"]
-                + "\n"
+                entry["url"] + "\n"
             )
-
-    # ========================================================
-    # FINAL REPORT
-    # ========================================================
 
     print()
     print("=" * 70)
@@ -1407,42 +873,21 @@ def main():
     )
 
     print(
-        f"Output: "
-        f"{OUTPUT}"
+        f"Output: {OUTPUT}"
     )
 
     print()
-    print(
-        "Stream health checks: DISABLED"
-    )
-
-    print(
-        "Offline/temporary streams: KEPT"
-    )
-
-    print(
-        "Source group-title: DYNAMIC"
-    )
-
-    print(
-        "Repository discovery: DYNAMIC"
-    )
-
-    # ========================================================
-    # SOURCE SUMMARY
-    # ========================================================
+    print("Stream health checks: DISABLED")
+    print("Offline/temporary streams: KEPT")
+    print("Source group-title: DYNAMIC")
+    print("Repository discovery: DYNAMIC")
+    print("GitHub authentication: ENABLED")
 
     print()
-    print(
-        "SOURCE SUMMARY"
-    )
-
-    print(
-        "-" * 70
-    )
+    print("SOURCE SUMMARY")
+    print("-" * 70)
 
     for repo, stats in repository_stats.items():
-
         if stats["files"] == 0:
             continue
 
@@ -1454,12 +899,7 @@ def main():
             f"{stats['files']} files"
         )
 
-    # ========================================================
-    # FAILED FILES
-    # ========================================================
-
     if failed_files:
-
         print()
         print(
             f"FAILED FILES: "
@@ -1467,7 +907,6 @@ def main():
         )
 
         for repo, path, error in failed_files:
-
             print(
                 f"  {repo}/{path}"
             )
@@ -1475,17 +914,6 @@ def main():
             print(
                 f"    {error}"
             )
-
-    # ========================================================
-    # UPLOAD TO GITHUB
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print("UPLOADING M3U TO GITHUB")
-    print("=" * 70)
-
-    upload_to_github()
 
 
 if __name__ == "__main__":
