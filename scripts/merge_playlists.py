@@ -31,24 +31,24 @@ PLAYLIST_EXTENSIONS = (
 
 
 # ============================================================
-# SPECIAL CATEGORY SOURCES
+# SPECIAL SOURCES
 #
-# IMPORTANT:
+# EVERYTHING belonging to these sources is forced into
+# exactly ONE final category.
 #
-# For these repositories the ORIGINAL group-title is NEVER
-# inspected.
-#
-# Every channel from each source goes into exactly ONE group.
+# Original group-title is NEVER used.
+# Playlist filename is NEVER used.
+# Multiple playlist files are merged.
 # ============================================================
 
-SPECIAL_GROUPS = {
+SPECIAL_REPO_GROUPS = {
     "app-m3u-generator": "App M3U",
 
     "buddylive": "Buddy Live",
     "buddylive-combined": "Buddy Live",
     "buddylive_v2": "Buddy Live",
 
-    "My-Streams": "My-Streams",
+    "my-streams": "My-Streams",
 }
 
 
@@ -85,7 +85,7 @@ SOURCE_NAME_MAP = {
     "lg-playlist-generator2":
         "LG",
 
-    "My-Streams":
+    "my-streams":
         "My-Streams",
 
     "nz":
@@ -103,7 +103,7 @@ SOURCE_NAME_MAP = {
     "pluto":
         "Pluto TV",
 
-    "RakutenTV":
+    "rakutentv":
         "Rakuten TV",
 
     "roku-playlist-generator":
@@ -130,6 +130,30 @@ SOURCE_NAME_MAP = {
     "xumo-playlist-generator":
         "Xumo",
 }
+
+
+# ============================================================
+# SPECIAL SOURCE DETECTION
+# ============================================================
+
+def normalize_repo_name(repo_name):
+
+    return (
+        repo_name
+        .strip()
+        .lower()
+    )
+
+
+def get_special_group(repo_name):
+
+    repo_key = normalize_repo_name(
+        repo_name
+    )
+
+    return SPECIAL_REPO_GROUPS.get(
+        repo_key
+    )
 
 
 # ============================================================
@@ -337,44 +361,44 @@ def get_first_level_group(group):
 
 def get_final_group(
     repo_name,
-    original_group
+    original_group=""
 ):
     """
-    IMPORTANT:
+    SPECIAL SOURCES ALWAYS OVERRIDE EVERYTHING.
 
-    SPECIAL_GROUPS is checked FIRST.
+    App M3U    -> App M3U
+    Buddy Live -> Buddy Live
+    My-Streams -> My-Streams
 
-    For App M3U, Buddy Live and My-Streams:
+    Original group-title is ignored for special sources.
 
-        original_group is NOT USED.
-
-    This guarantees that weird source groups such as:
-
-        APP M3U UNITED STATES CHANNEL-ID =xxxx
-
-    can NEVER create categories.
-
-    For all other repositories:
+    All other repositories use:
 
         SOURCE | FIRST LEVEL ORIGINAL GROUP
     """
 
     # ========================================================
-    # ABSOLUTE SPECIAL SOURCE OVERRIDE
+    # SPECIAL SOURCE OVERRIDE
     # ========================================================
 
-    if repo_name in SPECIAL_GROUPS:
+    special_group = get_special_group(
+        repo_name
+    )
 
-        return SPECIAL_GROUPS[
-            repo_name
-        ]
+    if special_group:
+
+        return special_group
 
     # ========================================================
     # NORMAL SOURCES
     # ========================================================
 
+    repo_key = normalize_repo_name(
+        repo_name
+    )
+
     source = SOURCE_NAME_MAP.get(
-        repo_name,
+        repo_key,
         repo_name
     )
 
@@ -663,41 +687,27 @@ def rebuild_extinf(
     final_group
 ):
     """
-    Rebuilds EXTINF while preserving ALL original
-    attributes.
+    Rebuild EXTINF while preserving ALL
+    original attributes.
 
-    EPG-related attributes such as:
-
-        tvg-id
-        tvg-name
-        tvg-logo
-        tvg-url
-        tvg-language
-        tvg-country
-        catchup
-        catchup-days
-        catchup-source
-
-    are preserved.
-
-    Only group-title is replaced by final_group.
+    Only group-title is replaced.
     """
 
     attributes = dict(
         entry["attrs"]
     )
 
-    # --------------------------------------------------------
-    # ONLY OUTPUT CATEGORY MODIFICATION
-    # --------------------------------------------------------
+    # ========================================================
+    # FORCE FINAL GROUP
+    # ========================================================
 
     attributes["group-title"] = (
         final_group
     )
 
-    # --------------------------------------------------------
-    # Preferred ordering
-    # --------------------------------------------------------
+    # ========================================================
+    # PREFERRED ATTRIBUTE ORDER
+    # ========================================================
 
     preferred_order = [
 
@@ -728,9 +738,9 @@ def rebuild_extinf(
                 key
             )
 
-    # --------------------------------------------------------
-    # Preserve every other attribute
-    # --------------------------------------------------------
+    # ========================================================
+    # PRESERVE ALL OTHER ATTRIBUTES
+    # ========================================================
 
     for key in attributes:
 
@@ -739,10 +749,6 @@ def rebuild_extinf(
             ordered_keys.append(
                 key
             )
-
-    # --------------------------------------------------------
-    # Build attributes
-    # --------------------------------------------------------
 
     attribute_string = " ".join(
         f'{key}="{attributes[key]}"'
@@ -758,6 +764,43 @@ def rebuild_extinf(
         f"{attribute_string},"
         f"{channel_name}"
     )
+
+
+# ============================================================
+# FINAL SPECIAL SOURCE ENFORCEMENT
+# ============================================================
+
+def enforce_special_categories(
+    entries
+):
+    """
+    FINAL SAFETY NET.
+
+    Regardless of what happened earlier,
+    every entry from a special repository
+    is forced into its single category.
+
+    This runs immediately before writing.
+    """
+
+    for entry in entries:
+
+        repo_name = entry.get(
+            "repo",
+            ""
+        )
+
+        special_group = get_special_group(
+            repo_name
+        )
+
+        if special_group:
+
+            entry["final_group"] = (
+                special_group
+            )
+
+    return entries
 
 
 # ============================================================
@@ -803,6 +846,11 @@ def build():
 
     print(
         "  My-Streams  -> My-Streams"
+    )
+
+    print(
+        "Special source grouping: "
+        "FORCED / MERGED"
     )
 
     print(
@@ -980,18 +1028,21 @@ def build():
                 for entry in entries:
 
                     # ------------------------------------------------
-                    # CRITICAL SPECIAL-SOURCE LOGIC
+                    # SPECIAL SOURCES
                     #
-                    # For these three sources we DO NOT even read
-                    # the original group-title.
+                    # NEVER inspect original group-title.
                     # ------------------------------------------------
 
-                    if repo_name in SPECIAL_GROUPS:
+                    special_group = (
+                        get_special_group(
+                            repo_name
+                        )
+                    )
+
+                    if special_group:
 
                         final_group = (
-                            SPECIAL_GROUPS[
-                                repo_name
-                            ]
+                            special_group
                         )
 
                     else:
@@ -1066,7 +1117,6 @@ def build():
         if not stream_url:
             continue
 
-        # EXACT STREAM URL MATCH
         if stream_url in seen_urls:
 
             duplicate_count += 1
@@ -1080,6 +1130,16 @@ def build():
         unique_entries.append(
             entry
         )
+
+    # ========================================================
+    # FINAL SPECIAL SOURCE ENFORCEMENT
+    # ========================================================
+
+    unique_entries = (
+        enforce_special_categories(
+            unique_entries
+        )
+    )
 
     # ========================================================
     # FINAL CATEGORY COUNT
@@ -1096,26 +1156,30 @@ def build():
     # ========================================================
     # SAFETY CHECK
     #
-    # These three sources MUST NOT generate subcategories.
+    # Special sources MUST have exactly one category each.
     # ========================================================
 
-    forbidden_prefixes = (
-        "App M3U |",
-        "Buddy Live |",
-        "My-Streams |",
-    )
+    special_expected = {
+        "App M3U",
+        "Buddy Live",
+        "My-Streams",
+    }
 
     bad_special_categories = []
 
     for category in category_counter:
 
-        for prefix in forbidden_prefixes:
+        if (
+            category.startswith("App M3U |")
+            or
+            category.startswith("Buddy Live |")
+            or
+            category.startswith("My-Streams |")
+        ):
 
-            if category.startswith(prefix):
-
-                bad_special_categories.append(
-                    category
-                )
+            bad_special_categories.append(
+                category
+            )
 
     if bad_special_categories:
 
@@ -1151,17 +1215,9 @@ def build():
         newline="\n"
     ) as output:
 
-        # ----------------------------------------------------
-        # M3U HEADER
-        # ----------------------------------------------------
-
         output.write(
             "#EXTM3U\n"
         )
-
-        # ----------------------------------------------------
-        # CHANNELS
-        # ----------------------------------------------------
 
         for entry in unique_entries:
 
@@ -1215,6 +1271,30 @@ def build():
         f"Output: "
         f"{OUTPUT_FILE}"
     )
+
+    # ========================================================
+    # SPECIAL SOURCE SUMMARY
+    # ========================================================
+
+    print()
+    print(
+        "SPECIAL SOURCE SUMMARY"
+    )
+
+    print(
+        "-" * 70
+    )
+
+    for category in (
+        "App M3U",
+        "Buddy Live",
+        "My-Streams",
+    ):
+
+        print(
+            f"{category}: "
+            f"{category_counter.get(category, 0)}"
+        )
 
     # ========================================================
     # CATEGORY SUMMARY
