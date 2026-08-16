@@ -1,21 +1,13 @@
-import os
-import re
-import sys
-import time
-import json
-import urllib.parse
-import urllib.request
-import urllib.error
-from collections import Counter, defaultdict
 #!/usr/bin/env python3
 
 import os
 import re
 import sys
 import time
-import json
 import urllib.request
 import urllib.error
+import urllib.parse
+import json
 from collections import Counter, defaultdict
 
 
@@ -28,407 +20,336 @@ OWNER = "BuddyChewChew"
 OUTPUT_FILE = "fast-all-regions.m3u"
 
 GITHUB_API = "https://api.github.com"
-GITHUB_RAW = "https://raw.githubusercontent.com"
 
+USER_AGENT = (
+    "Mozilla/5.0 "
+    "(compatible; FAST-All-Regions-Builder/1.0)"
+)
+
+# Only these extensions are considered playlist files.
 PLAYLIST_EXTENSIONS = (
     ".m3u",
     ".m3u8",
 )
 
-REQUEST_TIMEOUT = 30
-
-# Only these repositories get their original group-title
-# collapsed into one single category.
-SOURCE_CATEGORY_OVERRIDES = {
-    "app-m3u-generator": "App M3U",
+# Repositories that should be represented by ONE category only.
+SINGLE_CATEGORY_SOURCES = {
+    "App M3U",
+    "Buddy Live",
+    "My-Streams",
 }
-
-
-# ============================================================
-# SOURCE NAME NORMALIZATION
-# ============================================================
-
-SOURCE_NAMES = {
-    "airy-playlist-generator": "Airy",
-    "app-m3u-generator": "App M3U",
-    "buddylive": "Buddy Live",
-    "buddylive-combined": "Buddy Live",
-    "buddylive_v2": "Buddy Live",
-    "distro-playlist-generator": "DistroTV",
-    "lg-playlist-generator": "LG",
-    "lg-playlist-generator2": "LG",
-    "my-streams": "My-Streams",
-    "nz": "NZ",
-    "plex": "Plex",
-    "plex-alt-fast-channels": "Plex Alt",
-    "pluto": "Pluto TV",
-    "rakutentv": "Rakuten TV",
-    "roku-playlist-generator": "Roku",
-    "samsungtvplus": "Samsung TV Plus",
-    "sports": "Sports",
-    "tcl-playlist-generator": "TCL",
-    "tubi-scraper": "Tubi",
-    "vod": "VOD",
-    "whiplash-epg": "Whiplash",
-    "xumo-playlist-generator": "Xumo",
-    "dlxes": "dlxes",
-    "oly": "oly",
-}
-
-
-def normalize_source_name(repo):
-    key = repo.strip().lower()
-
-    if key in SOURCE_NAMES:
-        return SOURCE_NAMES[key]
-
-    # Generic cleanup for newly discovered repositories.
-    name = repo.replace("_", " ").replace("-", " ").strip()
-
-    replacements = {
-        "playlist generator": "",
-        "playlist-generator": "",
-        "scraper": "",
-    }
-
-    lowered = name.lower()
-
-    for old, new in replacements.items():
-        lowered = lowered.replace(old, new)
-
-    lowered = re.sub(r"\s+", " ", lowered).strip()
-
-    if not lowered:
-        lowered = name
-
-    return lowered.title()
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-def github_request(url, accept="application/vnd.github+json"):
+def http_get(url, timeout=30, retries=3):
+    """
+    Download a URL using urllib only.
+    No third-party dependencies.
+    """
+
     headers = {
-        "User-Agent": "FAST-All-Regions-Builder/1.0",
-        "Accept": accept,
+        "User-Agent": USER_AGENT,
+        "Accept": "*/*",
     }
 
-    token = os.environ.get("GITHUB_TOKEN")
+    request = urllib.request.Request(url, headers=headers)
 
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    last_error = None
 
-    req = urllib.request.Request(url, headers=headers)
-
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as response:
-        return response.read()
-
-
-def get_json(url):
-    return json.loads(github_request(url).decode("utf-8"))
-
-
-def get_text(url):
-    headers = {
-        "User-Agent": "FAST-All-Regions-Builder/1.0",
-    }
-
-    req = urllib.request.Request(url, headers=headers)
-
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as response:
-        raw = response.read()
-
-    # M3U files are normally UTF-8, but some repositories contain
-    # BOMs or slightly different encodings.
-    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+    for attempt in range(retries):
         try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            pass
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
 
-    return raw.decode("utf-8", errors="replace")
-
-
-# ============================================================
-# GITHUB REPOSITORY DISCOVERY
-# ============================================================
-
-def discover_repositories():
-    print("Discovering repositories...")
-
-    repos = []
-    page = 1
-
-    while True:
-        url = (
-            f"{GITHUB_API}/users/{OWNER}/repos"
-            f"?per_page=100&page={page}&type=public"
-        )
-
-        try:
-            data = get_json(url)
-        except Exception as exc:
-            print(f"[ERROR] Cannot discover repositories: {exc}")
-            break
-
-        if not data:
-            break
-
-        for repo in data:
-            if not repo.get("fork", False):
-                repos.append(repo["name"])
-
-        if len(data) < 100:
-            break
-
-        page += 1
-
-    return sorted(set(repos), key=str.lower)
-
-
-# ============================================================
-# TREE DISCOVERY
-# ============================================================
-
-def discover_playlist_files(repo):
-    """
-    Primary method:
-        Git Trees API
-
-    Fallback:
-        GitHub contents API
-
-    Returns repository-relative paths.
-    """
-
-    tree_url = (
-        f"{GITHUB_API}/repos/{OWNER}/{repo}/git/trees/main"
-        f"?recursive=1"
-    )
-
-    try:
-        data = get_json(tree_url)
-
-        if isinstance(data, dict) and "tree" in data:
-            paths = []
-
-            for item in data["tree"]:
-                if item.get("type") != "blob":
-                    continue
-
-                path = item.get("path", "")
-
-                if path.lower().endswith(PLAYLIST_EXTENSIONS):
-                    paths.append(path)
-
-            return sorted(paths)
-
-    except urllib.error.HTTPError as exc:
-        if exc.code != 403:
-            pass
-    except Exception:
-        pass
-
-    # Try master branch.
-    tree_url = (
-        f"{GITHUB_API}/repos/{OWNER}/{repo}/git/trees/master"
-        f"?recursive=1"
-    )
-
-    try:
-        data = get_json(tree_url)
-
-        if isinstance(data, dict) and "tree" in data:
-            paths = []
-
-            for item in data["tree"]:
-                if item.get("type") != "blob":
-                    continue
-
-                path = item.get("path", "")
-
-                if path.lower().endswith(PLAYLIST_EXTENSIONS):
-                    paths.append(path)
-
-            return sorted(paths)
-
-    except Exception:
-        pass
-
-    # Contents API fallback.
-    return discover_playlist_files_contents(repo)
-
-
-def discover_playlist_files_contents(repo, path=""):
-    """
-    Recursive GitHub Contents API fallback.
-    """
-
-    url = f"{GITHUB_API}/repos/{OWNER}/{repo}/contents/{path}"
-
-    try:
-        data = get_json(url)
-    except Exception:
-        return []
-
-    if not isinstance(data, list):
-        return []
-
-    results = []
-
-    for item in data:
-        item_type = item.get("type")
-        item_path = item.get("path", "")
-
-        if item_type == "file":
-            if item_path.lower().endswith(PLAYLIST_EXTENSIONS):
-                results.append(item_path)
-
-        elif item_type == "dir":
-            results.extend(
-                discover_playlist_files_contents(
-                    repo,
-                    item_path,
-                )
-            )
-
-    return results
-
-
-# ============================================================
-# RAW FILE FETCH
-# ============================================================
-
-def fetch_playlist(repo, path):
-    """
-    Try the repository's default branches.
-    """
-
-    branches = ["main", "master"]
-
-    for branch in branches:
-        url = (
-            f"{GITHUB_RAW}/{OWNER}/{repo}/"
-            f"{branch}/{urllib.parse.quote(path, safe='/')}"
-        )
-
-        try:
-            return get_text(url)
         except urllib.error.HTTPError as exc:
+            last_error = exc
+
+            # GitHub rate limit
+            if exc.code == 403:
+                retry_after = exc.headers.get("Retry-After")
+
+                if retry_after:
+                    try:
+                        wait = min(int(retry_after), 30)
+                    except ValueError:
+                        wait = 5
+                else:
+                    wait = 5
+
+                if attempt < retries - 1:
+                    time.sleep(wait)
+                    continue
+
             if exc.code == 404:
+                raise
+
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
                 continue
 
             raise
 
-    raise FileNotFoundError(
-        f"Playlist not found: {repo}/{path}"
-    )
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+
+            raise
+
+    raise last_error
+
+
+def http_get_text(url, timeout=30, retries=3):
+    data = http_get(url, timeout=timeout, retries=retries)
+
+    # UTF-8 is standard for M3U.
+    # Replace malformed bytes instead of killing the entire build.
+    return data.decode("utf-8-sig", errors="replace")
+
+
+def github_api(path):
+    url = f"{GITHUB_API}{path}"
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+    }
+
+    request = urllib.request.Request(url, headers=headers)
+
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+
+            if exc.code == 403:
+                remaining = exc.headers.get("X-RateLimit-Remaining")
+
+                # If the API rate limit is exhausted, stop using
+                # the API rather than hammering it.
+                if remaining == "0":
+                    raise RuntimeError(
+                        "GitHub API rate limit exceeded"
+                    )
+
+                if attempt < 2:
+                    time.sleep(5)
+                    continue
+
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+
+            raise
+
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+
+            raise
+
+    raise last_error
+
+
+# ============================================================
+# SOURCE NAME NORMALIZATION
+# ============================================================
+
+def normalize_source_name(repo_name):
+    """
+    Convert repository names into clean source names.
+
+    IMPORTANT:
+    We do NOT infer the source from channel names,
+    URLs, regions, or group titles.
+
+    The source is strictly the repository.
+    """
+
+    mapping = {
+        "airy-playlist-generator": "Airy",
+
+        "app-m3u-generator": "App M3U",
+
+        "buddylive": "Buddy Live",
+        "buddylive-combined": "Buddy Live",
+        "buddylive_v2": "Buddy Live",
+
+        "lg-playlist-generator": "LG",
+        "lg-playlist-generator2": "LG",
+
+        "My-Streams": "My-Streams",
+
+        "nz": "NZ",
+
+        "plex": "Plex",
+        "plex-alt-fast-channels": "Plex",
+
+        "pluto": "Pluto TV",
+
+        "RakutenTV": "Rakuten TV",
+
+        "roku-playlist-generator": "Roku",
+
+        "samsungtvplus": "Samsung TV Plus",
+
+        "tcl-playlist-generator": "TCL",
+
+        "tubi-scraper": "Tubi",
+
+        "xumo-playlist-generator": "Xumo",
+    }
+
+    return mapping.get(repo_name, repo_name)
+
+
+# ============================================================
+# GROUP NORMALIZATION
+# ============================================================
+
+def clean_group_text(group):
+    if not group:
+        return ""
+
+    group = group.strip()
+
+    # Collapse excessive whitespace.
+    group = re.sub(r"\s+", " ", group)
+
+    return group
+
+
+def get_first_level_group(group):
+    """
+    Keep ONLY the first group level.
+
+    Example:
+
+        News | US | National
+
+    becomes:
+
+        News
+    """
+
+    group = clean_group_text(group)
+
+    if not group:
+        return ""
+
+    # Support common hierarchy separators.
+    separators = [
+        "|",
+        " > ",
+        " / ",
+        "\\",
+    ]
+
+    for separator in separators:
+        if separator in group:
+            group = group.split(separator, 1)[0].strip()
+            break
+
+    return group
+
+
+def normalize_group(repo_name, original_group):
+    """
+    Build the final output group-title.
+
+    Rules:
+
+    App M3U
+        ALL groups -> App M3U
+
+    Buddy Live
+        ALL groups -> Buddy Live
+
+    My-Streams
+        ALL groups -> My-Streams
+
+    Everything else:
+        Source | First Level Original Group
+
+    No guessing.
+    """
+
+    source = normalize_source_name(repo_name)
+
+    # These sources intentionally have ONE category.
+    if source in SINGLE_CATEGORY_SOURCES:
+        return source
+
+    first_level = get_first_level_group(original_group)
+
+    if not first_level:
+        return source
+
+    return f"{source} | {first_level}"
 
 
 # ============================================================
 # M3U PARSER
 # ============================================================
 
-ATTRIBUTE_RE = re.compile(
-    r'([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"'
+ATTR_PATTERN = re.compile(
+    r'([\w-]+)="([^"]*)"'
 )
 
 
-def parse_attributes(line):
+def parse_extinf(line):
     """
-    Parse standard M3U attributes.
+    Parse #EXTINF attributes.
 
-    Example:
-        #EXTINF:-1 tvg-id="abc" group-title="News",Channel
+    Returns:
+        attributes, display_name
     """
 
-    attrs = {}
+    attributes = {}
 
-    for match in ATTRIBUTE_RE.finditer(line):
+    if not line.startswith("#EXTINF"):
+        return attributes, ""
+
+    comma_position = line.find(",")
+
+    if comma_position >= 0:
+        metadata = line[:comma_position]
+        display_name = line[comma_position + 1:].strip()
+    else:
+        metadata = line
+        display_name = ""
+
+    for match in ATTR_PATTERN.finditer(metadata):
         key = match.group(1)
         value = match.group(2)
-        attrs[key] = value
+        attributes[key] = value
 
-    return attrs
-
-
-def extract_channel_name(extinf_line):
-    """
-    Extract text after the final comma in EXTINF.
-
-    No guessing or modification.
-    """
-
-    if "," not in extinf_line:
-        return ""
-
-    return extinf_line.split(",", 1)[1].strip()
-
-
-def normalize_group(group):
-    """
-    We do NOT invent categories.
-
-    We only normalize whitespace and remove surrounding quotes
-    that may have survived malformed source data.
-    """
-
-    if group is None:
-        return ""
-
-    group = group.strip()
-
-    group = group.strip('"').strip("'").strip()
-
-    group = re.sub(r"\s+", " ", group)
-
-    return group
-
-
-def first_level_group(group):
-    """
-    Keep only the first group level.
-
-    Supports common separators such as:
-        A > B
-        A / B
-        A | B
-
-    IMPORTANT:
-    This is only structural parsing.
-    We do not infer a category.
-    """
-
-    if not group:
-        return ""
-
-    separators = (
-        " > ",
-        ">>",
-        " / ",
-        " | ",
-        " :: ",
-        " >",
-        "> ",
-    )
-
-    for sep in separators:
-        if sep in group:
-            return group.split(sep, 1)[0].strip()
-
-    return group.strip()
+    return attributes, display_name
 
 
 def parse_m3u(text):
     """
-    Returns a list of:
-        {
-            "extinf": original EXTINF line,
-            "attrs": parsed attributes,
-            "name": channel name,
-            "url": stream URL
-        }
+    Parse an M3U/M3U8 playlist.
+
+    We preserve:
+      - channel name
+      - original EXTINF attributes
+      - stream URL
+
+    We do NOT guess metadata.
     """
 
     lines = text.splitlines()
@@ -436,6 +357,7 @@ def parse_m3u(text):
     entries = []
 
     current_extinf = None
+    current_name = None
     current_attrs = None
 
     for raw_line in lines:
@@ -445,128 +367,215 @@ def parse_m3u(text):
             continue
 
         if line.startswith("#EXTINF"):
+            attrs, name = parse_extinf(line)
+
             current_extinf = line
-            current_attrs = parse_attributes(line)
+            current_name = name
+            current_attrs = attrs
+
             continue
 
+        # Ignore all other # directives.
         if line.startswith("#"):
             continue
 
-        # Anything non-comment following EXTINF is treated
-        # as the stream URL.
+        # This is the stream URL.
         if current_extinf is not None:
-            url = line
 
-            entries.append({
-                "extinf": current_extinf,
-                "attrs": current_attrs or {},
-                "name": extract_channel_name(current_extinf),
-                "url": url,
-            })
+            url = line.strip()
+
+            if url:
+                entries.append({
+                    "name": current_name or "",
+                    "attrs": dict(current_attrs or {}),
+                    "url": url,
+                })
 
             current_extinf = None
+            current_name = None
             current_attrs = None
 
     return entries
 
 
 # ============================================================
-# OUTPUT EXTINF
+# REPOSITORY DISCOVERY
 # ============================================================
 
-def rebuild_extinf(entry, source_name, repo):
+def discover_repositories():
     """
-    Preserve original EXTINF metadata but replace group-title
-    with the final category.
+    Discover public repositories belonging to OWNER.
 
-    App M3U is the one explicit grouping override.
+    We use GitHub's public API for repository discovery.
     """
 
-    original = entry["extinf"]
+    repositories = []
 
-    attrs = entry["attrs"].copy()
+    page = 1
 
-    original_name = entry["name"]
-
-    # --------------------------------------------------------
-    # Category
-    # --------------------------------------------------------
-
-    if repo.lower() in SOURCE_CATEGORY_OVERRIDES:
-        category = SOURCE_CATEGORY_OVERRIDES[repo.lower()]
-    else:
-        original_group = attrs.get("group-title", "")
-        category = first_level_group(
-            normalize_group(original_group)
+    while True:
+        path = (
+            f"/users/{urllib.parse.quote(OWNER)}"
+            f"/repos?per_page=100&page={page}"
         )
 
-        if not category:
-            category = "Uncategorized"
+        data = github_api(path)
 
-        category = f"{source_name} | {category}"
+        if not data:
+            break
 
-    # --------------------------------------------------------
-    # Preserve everything except group-title.
-    # --------------------------------------------------------
+        for repo in data:
+            if repo.get("fork"):
+                continue
 
-    # Find EXTINF prefix before first attribute.
-    prefix_match = re.match(
-        r"^#EXTINF:[^ ]*",
-        original
+            name = repo.get("name")
+
+            if name:
+                repositories.append(name)
+
+        if len(data) < 100:
+            break
+
+        page += 1
+
+    return sorted(
+        repositories,
+        key=lambda x: x.lower()
     )
 
-    if prefix_match:
-        prefix = prefix_match.group(0)
-    else:
-        prefix = "#EXTINF:-1"
 
-    # Reconstruct attributes in their original order as much
-    # as possible. group-title is replaced.
-    rebuilt_attrs = []
+# ============================================================
+# REPOSITORY TREE
+# ============================================================
 
-    seen_group = False
+def discover_playlist_files(repo_name):
+    """
+    Discover playlist files from the repository tree.
 
-    for match in ATTRIBUTE_RE.finditer(original):
-        key = match.group(1)
+    Uses the Git Git Trees API.
 
-        if key == "group-title":
-            rebuilt_attrs.append(
-                f'group-title="{category}"'
-            )
-            seen_group = True
-        else:
-            rebuilt_attrs.append(
-                f'{key}="{match.group(2)}"'
-            )
+    This avoids guessing filenames.
+    """
 
-    if not seen_group:
-        rebuilt_attrs.append(
-            f'group-title="{category}"'
-        )
+    # Get repository metadata first.
+    repo_path = (
+        f"/repos/{urllib.parse.quote(OWNER)}"
+        f"/{urllib.parse.quote(repo_name)}"
+    )
 
-    if original_name:
-        return (
-            prefix
-            + " "
-            + " ".join(rebuilt_attrs)
-            + ","
-            + original_name
-        )
+    repo_data = github_api(repo_path)
+
+    default_branch = repo_data.get(
+        "default_branch",
+        "main"
+    )
+
+    tree_path = (
+        f"/repos/{urllib.parse.quote(OWNER)}"
+        f"/{urllib.parse.quote(repo_name)}"
+        f"/git/trees/{urllib.parse.quote(default_branch)}"
+        f"?recursive=1"
+    )
+
+    tree_data = github_api(tree_path)
+
+    files = []
+
+    for item in tree_data.get("tree", []):
+        if item.get("type") != "blob":
+            continue
+
+        path = item.get("path", "")
+
+        lower_path = path.lower()
+
+        if lower_path.endswith(PLAYLIST_EXTENSIONS):
+            files.append(path)
+
+    return sorted(
+        files,
+        key=lambda x: x.lower()
+    )
+
+
+# ============================================================
+# RAW FILE URL
+# ============================================================
+
+def raw_url(repo_name, path):
+    encoded_path = "/".join(
+        urllib.parse.quote(part)
+        for part in path.split("/")
+    )
 
     return (
-        prefix
-        + " "
-        + " ".join(rebuilt_attrs)
-        + ","
+        f"https://raw.githubusercontent.com/"
+        f"{OWNER}/"
+        f"{urllib.parse.quote(repo_name)}/"
+        f"HEAD/{encoded_path}"
     )
+
+
+# ============================================================
+# OUTPUT WRITER
+# ============================================================
+
+def rebuild_extinf(entry, final_group):
+    """
+    Rebuild EXTINF while preserving original metadata.
+
+    We change ONLY:
+        group-title
+
+    Everything else is retained.
+    """
+
+    attrs = dict(entry["attrs"])
+
+    attrs["group-title"] = final_group
+
+    # Keep attribute ordering reasonably stable.
+    preferred_order = [
+        "tvg-id",
+        "tvg-name",
+        "tvg-logo",
+        "group-title",
+        "tvg-language",
+        "tvg-country",
+        "tvg-url",
+        "catchup",
+        "catchup-days",
+        "catchup-source",
+    ]
+
+    ordered_keys = []
+
+    for key in preferred_order:
+        if key in attrs:
+            ordered_keys.append(key)
+
+    for key in attrs:
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+
+    attr_string = " ".join(
+        f'{key}="{attrs[key]}"'
+        for key in ordered_keys
+    )
+
+    name = entry["name"]
+
+    if attr_string:
+        return f"#EXTINF:-1 {attr_string},{name}"
+
+    return f"#EXTINF:-1,{name}"
 
 
 # ============================================================
 # BUILD
 # ============================================================
 
-def main():
-
+def build():
     print("=" * 70)
     print("FAST ALL REGIONS BUILDER")
     print("=" * 70)
@@ -575,60 +584,57 @@ def main():
     print("Playlist discovery: GitHub repository tree")
     print("Category source: ORIGINAL M3U group-title")
     print("Group depth: FIRST LEVEL ONLY")
-    print("App M3U category: COLLAPSED TO ONE GROUP")
     print("Region guessing: DISABLED")
     print("Source guessing: DISABLED")
     print("Channel-name guessing: DISABLED")
     print("Duplicate detection: STREAM URL")
     print()
+    print("GitHub API authentication: DISABLED")
+    print()
 
-    token = os.environ.get("GITHUB_TOKEN")
+    try:
+        repositories = discover_repositories()
+
+    except Exception as exc:
+        print()
+        print("ERROR: Could not discover repositories.")
+        print(str(exc))
+        sys.exit(1)
 
     print(
-        "GitHub API authentication: "
-        + ("ENABLED" if token else "DISABLED")
+        f"Repositories discovered: {len(repositories)}"
     )
     print()
 
-    repositories = discover_repositories()
-
-    print(f"Repositories discovered: {len(repositories)}")
-    print()
-
-    # --------------------------------------------------------
-    # Global collections
-    # --------------------------------------------------------
-
     all_entries = []
-
-    seen_urls = set()
-
-    category_counter = Counter()
 
     source_stats = defaultdict(
         lambda: {
             "entries": 0,
             "files_ok": 0,
-            "files_total": 0,
+            "files_found": 0,
         }
     )
 
     empty_playlists = []
+
     failed_playlists = []
 
-    # --------------------------------------------------------
-    # Process repositories
-    # --------------------------------------------------------
+    category_counter = Counter()
 
-    for repo in repositories:
+    for repo_name in repositories:
 
-        print(f"=== {repo} ===")
+        print(f"=== {repo_name} ===")
 
         try:
-            playlist_files = discover_playlist_files(repo)
+            playlist_files = discover_playlist_files(
+                repo_name
+            )
+
         except Exception as exc:
             print(
-                f"  [ERROR] Cannot read repository tree: {exc}"
+                f"  [ERROR] Cannot read repository tree: "
+                f"{exc}"
             )
             print()
             continue
@@ -637,173 +643,179 @@ def main():
             f"Found {len(playlist_files)} playlist files"
         )
 
-        source_name = normalize_source_name(repo)
-
-        source_stats[repo]["files_total"] = len(
-            playlist_files
+        source_stats[repo_name]["files_found"] = (
+            len(playlist_files)
         )
 
-        for path in playlist_files:
+        for playlist_path in playlist_files:
 
             try:
-                text = fetch_playlist(repo, path)
+                url = raw_url(
+                    repo_name,
+                    playlist_path
+                )
+
+                text = http_get_text(
+                    url,
+                    timeout=45,
+                    retries=3
+                )
+
                 entries = parse_m3u(text)
 
-            except Exception as exc:
+                if not entries:
+                    print(
+                        f"  [EMPTY] {playlist_path}"
+                    )
+
+                    empty_playlists.append(
+                        f"{repo_name}/{playlist_path}"
+                    )
+
+                    continue
+
                 print(
-                    f"  [SKIP] {path}: {exc}"
+                    f"  [OK] {playlist_path}: "
+                    f"{len(entries)} entries"
+                )
+
+                source_stats[repo_name]["files_ok"] += 1
+                source_stats[repo_name]["entries"] += len(
+                    entries
+                )
+
+                for entry in entries:
+
+                    original_group = entry["attrs"].get(
+                        "group-title",
+                        ""
+                    )
+
+                    final_group = normalize_group(
+                        repo_name,
+                        original_group
+                    )
+
+                    entry["repo"] = repo_name
+                    entry["playlist_path"] = playlist_path
+                    entry["final_group"] = final_group
+
+                    all_entries.append(entry)
+
+                    category_counter[final_group] += 1
+
+            except Exception as exc:
+
+                print(
+                    f"  [SKIP] {playlist_path}: {exc}"
                 )
 
                 failed_playlists.append(
-                    f"{repo}/{path}"
-                )
-
-                continue
-
-            if not entries:
-                print(
-                    f"  [EMPTY] {path}"
-                )
-
-                empty_playlists.append(
-                    f"{repo}/{path}"
-                )
-
-                continue
-
-            print(
-                f"  [OK] {path}: {len(entries)} entries"
-            )
-
-            source_stats[repo]["files_ok"] += 1
-
-            for entry in entries:
-
-                url = entry["url"].strip()
-
-                if not url:
-                    continue
-
-                # ------------------------------------------------
-                # Duplicate detection:
-                # EXACT STREAM URL
-                # ------------------------------------------------
-
-                if url in seen_urls:
-                    continue
-
-                seen_urls.add(url)
-
-                # ------------------------------------------------
-                # Build final EXTINF
-                # ------------------------------------------------
-
-                extinf = rebuild_extinf(
-                    entry,
-                    source_name,
-                    repo,
-                )
-
-                # Determine category for reporting.
-                if repo.lower() in SOURCE_CATEGORY_OVERRIDES:
-                    final_category = SOURCE_CATEGORY_OVERRIDES[
-                        repo.lower()
-                    ]
-                else:
-                    original_group = entry["attrs"].get(
-                        "group-title",
-                        "",
-                    )
-
-                    group = first_level_group(
-                        normalize_group(
-                            original_group
-                        )
-                    )
-
-                    if not group:
-                        group = "Uncategorized"
-
-                    final_category = (
-                        f"{source_name} | {group}"
-                    )
-
-                category_counter[final_category] += 1
-
-                source_stats[repo]["entries"] += 1
-
-                all_entries.append(
-                    (
-                        extinf,
-                        url,
-                        source_name,
-                        repo,
-                    )
+                    f"{repo_name}/{playlist_path}"
                 )
 
         print()
+
+    print("Removing duplicate stream URLs...")
+    print()
+
+    # ========================================================
+    # DUPLICATE REMOVAL
+    # ========================================================
+
+    unique_entries = []
+    seen_urls = set()
+
+    duplicate_count = 0
+
+    for entry in all_entries:
+
+        url = entry["url"].strip()
+
+        if not url:
+            continue
+
+        # EXACT stream URL comparison.
+        if url in seen_urls:
+            duplicate_count += 1
+            continue
+
+        seen_urls.add(url)
+
+        unique_entries.append(entry)
+
+    # Recalculate categories AFTER duplicate removal.
+    final_category_counter = Counter(
+        entry["final_group"]
+        for entry in unique_entries
+    )
 
     # ========================================================
     # WRITE OUTPUT
     # ========================================================
 
-    print("Removing duplicate stream URLs...")
-    print()
-
     with open(
         OUTPUT_FILE,
         "w",
         encoding="utf-8",
-        newline="\n",
+        newline="\n"
     ) as output:
 
-        output.write("#EXTM3U\n")
+        output.write(
+            "#EXTM3U\n"
+        )
 
-        for extinf, url, _, _ in all_entries:
-            output.write(extinf + "\n")
-            output.write(url + "\n")
+        for entry in unique_entries:
+
+            output.write(
+                rebuild_extinf(
+                    entry,
+                    entry["final_group"]
+                )
+                + "\n"
+            )
+
+            output.write(
+                entry["url"].strip()
+                + "\n"
+            )
 
     # ========================================================
     # SUMMARY
     # ========================================================
-
-    total_read = sum(
-        source_stats[r]["entries"]
-        for r in source_stats
-    )
-
-    unique_count = len(all_entries)
-
-    duplicates_removed = (
-        total_read - unique_count
-    )
 
     print("=" * 70)
     print("BUILD COMPLETE")
     print("=" * 70)
 
     print(
-        f"Repositories discovered: {len(repositories)}"
+        f"Repositories discovered: "
+        f"{len(repositories)}"
     )
 
     print(
-        f"Playlist entries read: {total_read}"
+        f"Playlist entries read: "
+        f"{len(all_entries)}"
     )
 
     print(
-        f"Unique stream URLs: {unique_count}"
+        f"Unique stream URLs: "
+        f"{len(unique_entries)}"
     )
 
     print(
-        f"Duplicate URLs removed: {duplicates_removed}"
+        f"Duplicate URLs removed: "
+        f"{duplicate_count}"
     )
 
     print(
-        f"Categories: {len(category_counter)}"
+        f"Categories: "
+        f"{len(final_category_counter)}"
     )
 
     print(
-        f"Output: {OUTPUT_FILE}"
+        f"Output: "
+        f"{OUTPUT_FILE}"
     )
 
     print()
@@ -811,8 +823,10 @@ def main():
     print("-" * 70)
 
     for category, count in sorted(
-        category_counter.items(),
-        key=lambda x: (x[0].lower(), x[1]),
+        final_category_counter.items(),
+        key=lambda item: (
+            item[0].lower()
+        )
     ):
         print(
             f"{category}: {count}"
@@ -822,42 +836,59 @@ def main():
     print("SOURCE SUMMARY")
     print("-" * 70)
 
-    for repo in repositories:
+    for repo_name in repositories:
 
-        stats = source_stats[repo]
+        stats = source_stats.get(
+            repo_name,
+            {
+                "entries": 0,
+                "files_ok": 0,
+                "files_found": 0,
+            }
+        )
 
-        if stats["files_total"] == 0 and stats["entries"] == 0:
+        if stats["files_found"] == 0:
             continue
 
         print(
-            f"{repo}: "
+            f"{repo_name}: "
             f"{stats['entries']} entries "
             f"from "
             f"{stats['files_ok']}/"
-            f"{stats['files_total']} files"
+            f"{stats['files_found']} files"
         )
 
     if empty_playlists:
         print()
         print(
-            f"EMPTY PLAYLISTS: {len(empty_playlists)}"
+            f"EMPTY PLAYLISTS: "
+            f"{len(empty_playlists)}"
         )
 
         for item in empty_playlists:
-            print(f"  {item}")
+            print(
+                f"  {item}"
+            )
 
     if failed_playlists:
         print()
         print(
-            f"FAILED PLAYLISTS: {len(failed_playlists)}"
+            f"FAILED PLAYLISTS: "
+            f"{len(failed_playlists)}"
         )
 
         for item in failed_playlists:
-            print(f"  {item}")
+            print(
+                f"  {item}"
+            )
 
     print()
-    print("=" * 70)
+    print("Done.")
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    main()
+    build()
