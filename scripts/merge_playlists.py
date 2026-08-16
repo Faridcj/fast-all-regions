@@ -1,13 +1,14 @@
 import json
 import re
 import urllib.request
-import urllib.error
 from urllib.parse import quote, unquote
 from pathlib import PurePosixPath
 from collections import defaultdict
 
 OWNER = "BuddyChewChew"
 OUTPUT = "fast-all-regions.m3u"
+
+REQUEST_TIMEOUT = 90
 
 API_HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -18,19 +19,11 @@ HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 FAST-All-Regions-Builder"
 }
 
-# ------------------------------------------------------------
-# SETTINGS
-# ------------------------------------------------------------
-
-REQUEST_TIMEOUT = 90
-
-# Files considered playlists
 PLAYLIST_EXTENSIONS = (
     ".m3u",
     ".m3u8",
 )
 
-# Files/directories that should not be treated as channel lists
 IGNORE_PARTS = {
     "epg",
     "epg.xml",
@@ -45,10 +38,6 @@ IGNORE_PARTS = {
     "example",
     "examples",
 }
-
-# ------------------------------------------------------------
-# COUNTRY / REGION MAP
-# ------------------------------------------------------------
 
 COUNTRIES = {
     "us": "US",
@@ -182,9 +171,10 @@ COUNTRIES = {
     "taiwan": "Taiwan",
 }
 
-# ------------------------------------------------------------
+
+# ============================================================
 # HTTP
-# ------------------------------------------------------------
+# ============================================================
 
 def fetch_bytes(url, headers=None):
 
@@ -224,14 +214,13 @@ def github_json(url):
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # GITHUB DISCOVERY
-# ------------------------------------------------------------
+# ============================================================
 
 def get_all_repositories():
 
     repositories = []
-
     page = 1
 
     while True:
@@ -246,14 +235,12 @@ def get_all_repositories():
         )
 
         try:
-
             data = github_json(url)
 
         except Exception as error:
 
             print(
-                f"[ERROR] Cannot read repository list: "
-                f"{error}"
+                f"[ERROR] Cannot read repositories: {error}"
             )
 
             break
@@ -266,13 +253,14 @@ def get_all_repositories():
             if repo.get("fork"):
                 continue
 
+            if repo.get("archived"):
+                continue
+
             repositories.append(
                 {
                     "name": repo["name"],
                     "default_branch": (
-                        repo.get(
-                            "default_branch"
-                        )
+                        repo.get("default_branch")
                         or "main"
                     ),
                 }
@@ -286,10 +274,7 @@ def get_all_repositories():
     return repositories
 
 
-def get_repository_tree(
-    repo,
-    branch
-):
+def get_repository_tree(repo, branch):
 
     url = (
         f"https://api.github.com/repos/"
@@ -301,6 +286,12 @@ def get_repository_tree(
     try:
 
         data = github_json(url)
+
+        if data.get("truncated"):
+
+            print(
+                f"[WARNING] Tree truncated: {repo}"
+            )
 
         return data.get(
             "tree",
@@ -317,9 +308,9 @@ def get_repository_tree(
         return []
 
 
-# ------------------------------------------------------------
+# ============================================================
 # PLAYLIST DISCOVERY
-# ------------------------------------------------------------
+# ============================================================
 
 def is_playlist(path):
 
@@ -343,10 +334,7 @@ def is_playlist(path):
     return True
 
 
-def discover_playlists(
-    repo,
-    branch
-):
+def discover_playlists(repo, branch):
 
     tree = get_repository_tree(
         repo,
@@ -365,21 +353,20 @@ def discover_playlists(
             ""
         )
 
-        if not is_playlist(path):
-            continue
+        if is_playlist(path):
 
-        result.append(path)
+            result.append(path)
 
     return sorted(result)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SERVICE NAME
-# ------------------------------------------------------------
+# ============================================================
 
 def clean_service_name(repo):
 
-    names = {
+    known = {
         "app-m3u-generator": "FAST Apps",
         "plex-alt-fast-channels": "Plex Alt",
         "samsungtvplus": "Samsung TV Plus",
@@ -397,16 +384,13 @@ def clean_service_name(repo):
         "plex": "Plex",
     }
 
-    if repo in names:
-        return names[repo]
-
-    # Generic fallback for future Buddy repos
-    name = repo
+    if repo in known:
+        return known[repo]
 
     name = re.sub(
         r"[-_]+",
         " ",
-        name
+        repo
     )
 
     name = re.sub(
@@ -432,14 +416,11 @@ def clean_service_name(repo):
     return name.title()
 
 
-# ------------------------------------------------------------
-# ATTRIBUTE HELPERS
-# ------------------------------------------------------------
+# ============================================================
+# M3U ATTRIBUTES
+# ============================================================
 
-def get_attribute(
-    extinf,
-    attribute
-):
+def get_attribute(extinf, attribute):
 
     pattern = (
         rf'{re.escape(attribute)}='
@@ -458,10 +439,7 @@ def get_attribute(
     return ""
 
 
-def replace_group_title(
-    extinf,
-    group
-):
+def replace_group_title(extinf, group):
 
     if re.search(
         r'group-title="[^"]*"',
@@ -471,7 +449,7 @@ def replace_group_title(
 
         return re.sub(
             r'group-title="[^"]*"',
-            f'group-title="{group}"',
+            lambda m: f'group-title="{group}"',
             extinf,
             flags=re.IGNORECASE
         )
@@ -488,9 +466,9 @@ def replace_group_title(
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # NORMALIZATION
-# ------------------------------------------------------------
+# ============================================================
 
 def normalize_text(value):
 
@@ -515,9 +493,7 @@ def normalize_text(value):
     return value.strip()
 
 
-def normalize_country(
-    value
-):
+def normalize_country(value):
 
     value = normalize_text(
         value
@@ -537,9 +513,9 @@ def normalize_country(
     return ""
 
 
-# ------------------------------------------------------------
-# COUNTRY DETECTION
-# ------------------------------------------------------------
+# ============================================================
+# COUNTRY / REGION
+# ============================================================
 
 def detect_country(
     extinf,
@@ -547,7 +523,10 @@ def detect_country(
     service
 ):
 
+    # --------------------------------------------------------
     # 1. Explicit metadata
+    # --------------------------------------------------------
+
     for attr in (
         "country",
         "region",
@@ -568,8 +547,11 @@ def detect_country(
         if country:
             return country
 
-    # 2. File/path tokens
-    path_text = (
+    # --------------------------------------------------------
+    # 2. Filename/path
+    # --------------------------------------------------------
+
+    stem = (
         PurePosixPath(path)
         .stem
         .lower()
@@ -577,7 +559,7 @@ def detect_country(
 
     tokens = re.split(
         r"[^a-zA-Z]+",
-        path_text
+        stem
     )
 
     for token in tokens:
@@ -589,17 +571,20 @@ def detect_country(
         if country:
             return country
 
-    # 3. Group title
-    group = get_attribute(
+    # --------------------------------------------------------
+    # 3. Original group
+    # --------------------------------------------------------
+
+    original_group = get_attribute(
         extinf,
         "group-title"
     )
 
-    if group:
+    if original_group:
 
         pieces = re.split(
             r"[|>/,;:]+",
-            group
+            original_group
         )
 
         for piece in pieces:
@@ -611,7 +596,10 @@ def detect_country(
             if country:
                 return country
 
-    # 4. tvg-id prefix
+    # --------------------------------------------------------
+    # 4. tvg-id
+    # --------------------------------------------------------
+
     tvgid = get_attribute(
         extinf,
         "tvg-id"
@@ -631,7 +619,10 @@ def detect_country(
             if country:
                 return country
 
-    # 5. Known service defaults
+    # --------------------------------------------------------
+    # 5. Known US-oriented services
+    # --------------------------------------------------------
+
     defaults = {
         "LG Channels": "US",
         "LG Channels 2": "US",
@@ -648,13 +639,11 @@ def detect_country(
     )
 
 
-# ------------------------------------------------------------
-# GENRE
-# ------------------------------------------------------------
+# ============================================================
+# ORIGINAL GROUP
+# ============================================================
 
-def extract_original_group(
-    extinf
-):
+def extract_original_group(extinf):
 
     group = get_attribute(
         extinf,
@@ -666,15 +655,12 @@ def extract_original_group(
 
     group = group.strip()
 
-    if not group:
-        return "General"
-
-    return group
+    return group or "General"
 
 
-# ------------------------------------------------------------
-# PLAYLIST PARSER
-# ------------------------------------------------------------
+# ============================================================
+# M3U PARSER
+# ============================================================
 
 def parse_m3u(text):
 
@@ -686,7 +672,6 @@ def parse_m3u(text):
     )
 
     entries = []
-
     current_extinf = None
 
     for line in lines:
@@ -696,9 +681,7 @@ def parse_m3u(text):
         if not line:
             continue
 
-        if line.startswith(
-            "#EXTINF:"
-        ):
+        if line.startswith("#EXTINF:"):
 
             current_extinf = line
 
@@ -720,7 +703,7 @@ def parse_m3u(text):
             entries.append(
                 (
                     current_extinf,
-                    line.strip()
+                    line
                 )
             )
 
@@ -729,13 +712,7 @@ def parse_m3u(text):
     return entries
 
 
-# ------------------------------------------------------------
-# CHANNEL NAME
-# ------------------------------------------------------------
-
-def get_channel_name(
-    extinf
-):
+def get_channel_name(extinf):
 
     if "," not in extinf:
         return ""
@@ -747,26 +724,9 @@ def get_channel_name(
     )
 
 
-# ------------------------------------------------------------
-# SOURCE ID
-# ------------------------------------------------------------
-
-def source_id(
-    repo,
-    path
-):
-
-    return (
-        f"{repo}/{path}"
-    )
-
-
-# ------------------------------------------------------------
-# LOAD PREVIOUS PLAYLIST
-#
-# Used only as a safety net when a source temporarily
-# becomes unavailable.
-# ------------------------------------------------------------
+# ============================================================
+# PREVIOUS OUTPUT
+# ============================================================
 
 def parse_previous_output():
 
@@ -778,30 +738,44 @@ def parse_previous_output():
             encoding="utf-8"
         ) as file:
 
-            text = file.read()
-
-        return parse_m3u(
-            text
-        )
+            return parse_m3u(
+                file.read()
+            )
 
     except Exception:
 
         return []
 
 
-def extract_source_marker(
-    extinf
-):
+def detect_previous_repo(extinf):
 
-    return get_attribute(
+    """
+    Try to recover repository information from the
+    generated group-title.
+
+    Example:
+      group-title="Plex | US | News"
+
+    This is intentionally conservative.
+    """
+
+    group = get_attribute(
         extinf,
-        "x-source"
+        "group-title"
     )
 
+    if not group:
+        return ""
 
-# ------------------------------------------------------------
+    return group.split(
+        "|",
+        1
+    )[0].strip()
+
+
+# ============================================================
 # BUILD
-# ------------------------------------------------------------
+# ============================================================
 
 def main():
 
@@ -823,24 +797,18 @@ def main():
         parse_previous_output()
     )
 
-    # Previous entries grouped by repository.
-    previous_by_repo = defaultdict(list)
+    previous_by_service = defaultdict(list)
 
     for extinf, url in previous_entries:
 
-        marker = extract_source_marker(
+        service = detect_previous_repo(
             extinf
         )
 
-        if marker:
+        if service:
 
-            repo = marker.split(
-                "/",
-                1
-            )[0]
-
-            previous_by_repo[
-                repo
+            previous_by_service[
+                service
             ].append(
                 (
                     extinf,
@@ -850,22 +818,16 @@ def main():
 
     all_entries = []
 
-    successful_sources = set()
-    failed_sources = []
+    failed_repositories = []
 
-    # --------------------------------------------------------
-    # DISCOVER EVERY REPO
-    # --------------------------------------------------------
+    # ========================================================
+    # EVERY PUBLIC BUDDYCHEWCHEW REPOSITORY
+    # ========================================================
 
     for repo_info in repositories:
 
-        repo = repo_info[
-            "name"
-        ]
-
-        branch = repo_info[
-            "default_branch"
-        ]
+        repo = repo_info["name"]
+        branch = repo_info["default_branch"]
 
         print()
         print(
@@ -886,14 +848,17 @@ def main():
         )
 
         if not playlist_paths:
-
             continue
 
         service = clean_service_name(
             repo
         )
 
-        repo_success = False
+        repo_entries_before = len(
+            all_entries
+        )
+
+        successful_files = 0
 
         for path in playlist_paths:
 
@@ -919,14 +884,7 @@ def main():
                     f"{len(entries)} channels"
                 )
 
-                successful_sources.add(
-                    source_id(
-                        repo,
-                        path
-                    )
-                )
-
-                repo_success = True
+                successful_files += 1
 
                 for extinf, stream_url in entries:
 
@@ -942,22 +900,16 @@ def main():
                         )
                     )
 
-                    # ------------------------------------------------
                     # IMPORTANT:
                     #
-                    # We do NOT hard-code genres.
+                    # The genre/category is NEVER hard-coded.
                     #
-                    # Whatever group-title the source currently has
-                    # is automatically used.
+                    # It is read directly from the source playlist.
                     #
-                    # Therefore if Buddy changes:
-                    #
-                    # News -> News & Politics
-                    #
-                    # our next automatic run picks it up.
-                    # ------------------------------------------------
+                    # Therefore future changes in Buddy's
+                    # group-title are automatically reflected.
 
-                    group = (
+                    final_group = (
                         f"{service} | "
                         f"{country} | "
                         f"{original_group}"
@@ -966,41 +918,17 @@ def main():
                     new_extinf = (
                         replace_group_title(
                             extinf,
-                            group
+                            final_group
                         )
                     )
-
-                    # Add an internal source marker.
-                    # This is metadata only and does not alter the
-                    # channel URL.
-                    if 'x-source="' not in new_extinf:
-
-                        comma = new_extinf.find(
-                            ","
-                        )
-
-                        if comma != -1:
-
-                            new_extinf = (
-                                new_extinf[:comma]
-                                + ' x-source="'
-                                + source_id(
-                                    repo,
-                                    path
-                                )
-                                + '"'
-                                + new_extinf[comma:]
-                            )
 
                     all_entries.append(
                         {
                             "extinf": new_extinf,
-                            "url": stream_url,
-                            "repo": repo,
-                            "path": path,
+                            "url": stream_url.strip(),
                             "service": service,
                             "country": country,
-                            "group": original_group,
+                            "original_group": original_group,
                             "name": get_channel_name(
                                 extinf
                             ),
@@ -1015,24 +943,24 @@ def main():
                     f"{error}"
                 )
 
-                failed_sources.append(
-                    (
-                        repo,
-                        path,
-                        str(error)
-                    )
-                )
+        # ----------------------------------------------------
+        # If the whole repository failed, keep previous
+        # entries belonging to the same service.
+        # ----------------------------------------------------
 
-        # --------------------------------------------------------
-        # If an entire repo has failed, retain its previous
-        # entries from the last successful run.
-        # --------------------------------------------------------
+        repo_entries_after = len(
+            all_entries
+        )
 
-        if not repo_success:
+        if (
+            successful_files == 0
+            and repo_entries_after
+            == repo_entries_before
+        ):
 
             old_entries = (
-                previous_by_repo.get(
-                    repo,
+                previous_by_service.get(
+                    service,
                     []
                 )
             )
@@ -1042,7 +970,8 @@ def main():
                 print(
                     f"  [FALLBACK] "
                     f"Keeping {len(old_entries)} "
-                    f"previous channels from {repo}"
+                    f"previous entries for "
+                    f"{service}"
                 )
 
                 for extinf, url in old_entries:
@@ -1050,37 +979,38 @@ def main():
                     all_entries.append(
                         {
                             "extinf": extinf,
-                            "url": url,
-                            "repo": repo,
-                            "path": extract_source_marker(
-                                extinf
-                            ),
-                            "service": clean_service_name(
-                                repo
-                            ),
+                            "url": url.strip(),
+                            "service": service,
                             "country": "",
-                            "group": "",
+                            "original_group": (
+                                get_attribute(
+                                    extinf,
+                                    "group-title"
+                                )
+                            ),
                             "name": get_channel_name(
                                 extinf
                             ),
                         }
                     )
 
-    # --------------------------------------------------------
+            else:
+
+                failed_repositories.append(
+                    repo
+                )
+
+    # ========================================================
     # DEDUPLICATION
-    #
-    # NOT URL-only.
-    #
-    # Same stream URL + same service + same channel name
-    # + same group = duplicate.
-    #
-    # If metadata differs, retain it.
-    # --------------------------------------------------------
+    # ========================================================
+
+    print()
+    print(
+        "Removing only metadata-identical duplicates..."
+    )
 
     seen = set()
-
     unique_entries = []
-
     duplicate_count = 0
 
     for entry in all_entries:
@@ -1091,16 +1021,16 @@ def main():
             .lower()
         )
 
-        name_key = normalize_text(
-            entry["name"]
-        )
-
         service_key = normalize_text(
             entry["service"]
         )
 
+        name_key = normalize_text(
+            entry["name"]
+        )
+
         group_key = normalize_text(
-            entry["group"]
+            entry["original_group"]
         )
 
         dedup_key = (
@@ -1113,7 +1043,6 @@ def main():
         if dedup_key in seen:
 
             duplicate_count += 1
-
             continue
 
         seen.add(
@@ -1124,9 +1053,9 @@ def main():
             entry
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SORT
-    # --------------------------------------------------------
+    # ========================================================
 
     unique_entries.sort(
         key=lambda item: (
@@ -1137,7 +1066,7 @@ def main():
                 item["country"]
             ),
             normalize_text(
-                item["group"]
+                item["original_group"]
             ),
             normalize_text(
                 item["name"]
@@ -1145,9 +1074,9 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # WRITE
-    # --------------------------------------------------------
+    # ========================================================
 
     with open(
         OUTPUT,
@@ -1172,9 +1101,9 @@ def main():
                 + "\n"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # REPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     print()
     print("=" * 70)
@@ -1182,7 +1111,7 @@ def main():
     print("=" * 70)
 
     print(
-        f"Repositories: "
+        f"Repositories discovered: "
         f"{len(repositories)}"
     )
 
@@ -1206,42 +1135,36 @@ def main():
         f"{OUTPUT}"
     )
 
-    if failed_sources:
+    print()
+    print(
+        "Stream health checks: DISABLED"
+    )
+
+    print(
+        "Offline streams: KEPT"
+    )
+
+    print(
+        "Source group-title: DYNAMIC"
+    )
+
+    print(
+        "Repository discovery: DYNAMIC"
+    )
+
+    if failed_repositories:
 
         print()
         print(
-            "Sources with errors:"
+            "[WARNING] Repositories with no "
+            "usable playlist:"
         )
 
-        for repo, path, error in (
-            failed_sources
-        ):
+        for repo in failed_repositories:
 
             print(
-                f"  {repo}/{path}"
+                f"  - {repo}"
             )
-
-            print(
-                f"    {error}"
-            )
-
-    print()
-    print(
-        "IMPORTANT:"
-    )
-
-    print(
-        "No stream health checks were performed."
-    )
-
-    print(
-        "Offline/temporary streams were NOT removed."
-    )
-
-    print(
-        "Playlist group titles are read dynamically "
-        "from the source files."
-    )
 
 
 if __name__ == "__main__":
