@@ -17,15 +17,15 @@ REPORT_FILE = "epg-audit.txt"
 
 USER_AGENT = (
     "Mozilla/5.0 "
-    "(compatible; FAST-EPG-Audit/2.0)"
+    "(compatible; FAST-EPG-Audit/3.0)"
 )
 
 
 # ============================================================
 # EPG SOURCES
 #
+# Only sources with a known XMLTV endpoint are included.
 # Multiple URLs are tried in order.
-# The first valid XMLTV source is used.
 # ============================================================
 
 EPG_SOURCES = {
@@ -38,21 +38,21 @@ EPG_SOURCES = {
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/samsungtvplus/main/"
         "output/samsung_tvplus.xml",
-
-        "https://i.mjh.nz/SamsungTVPlus/us.xml",
     ],
 
 
     # --------------------------------------------------------
     # LG Channels
+    #
+    # The BuddyChewChew file is retained because the previous
+    # run proved that the source exists, although its XML needs
+    # further investigation.
     # --------------------------------------------------------
 
     "LG TV": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/lg-playlist-generator/main/"
         "lg_channels_us.xml",
-
-        "https://i.mjh.nz/LGTV/us.xml",
     ],
 
 
@@ -101,33 +101,34 @@ EPG_SOURCES = {
         "https://raw.githubusercontent.com/"
         "matthuisman/i.mjh.nz/refs/heads/master/"
         "PlutoTV/all.xml",
-
-        "https://i.mjh.nz/PlutoTV/all.xml",
     ],
 
 
     # --------------------------------------------------------
-    # Plex
+    # Plex TV
+    #
+    # IMPORTANT:
+    # all.xml.gz produced 2856 matches in the previous run.
+    # Do NOT replace it with us.xml.gz.
     # --------------------------------------------------------
 
     "Plex TV": [
         "https://raw.githubusercontent.com/"
         "matthuisman/i.mjh.nz/refs/heads/master/"
-        "Plex/us.xml.gz",
+        "Plex/all.xml.gz",
 
         "https://raw.githubusercontent.com/"
         "matthuisman/i.mjh.nz/refs/heads/master/"
-        "Plex/us.xml",
-
-        "https://i.mjh.nz/Plex/us.xml",
+        "Plex/all.xml",
     ],
 
 
     # --------------------------------------------------------
     # Xumo
     #
-    # Keep Xumo enabled.
-    # Try known public EPG/API-derived sources.
+    # Kept intentionally. Current known BuddyChewChew endpoint
+    # is tested first. If it fails, the report records the
+    # failure instead of pretending another generic EPG matches.
     # --------------------------------------------------------
 
     "Xumo": [
@@ -138,8 +139,6 @@ EPG_SOURCES = {
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/xumo-playlist-generator/main/"
         "xumo_epg.xml",
-
-        "https://i.mjh.nz/Xumo/us.xml",
     ],
 
 
@@ -151,59 +150,6 @@ EPG_SOURCES = {
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/tubi-scraper/main/"
         "tubi_epg.xml",
-
-        "https://i.mjh.nz/Tubi/us.xml",
-    ],
-
-
-    # --------------------------------------------------------
-    # Roku
-    # --------------------------------------------------------
-
-    "Roku": [
-        "https://i.mjh.nz/Roku/us.xml",
-    ],
-
-
-    # --------------------------------------------------------
-    # DistroTV
-    # --------------------------------------------------------
-
-    "DistroTV": [
-        "https://i.mjh.nz/DistroTV/us.xml",
-    ],
-
-
-    # --------------------------------------------------------
-    # Local / additional FAST sources
-    # --------------------------------------------------------
-
-    "App M3U": [
-        "https://epg.pw/xmltv/epg_US.xml",
-    ],
-
-    "Buddy Live": [
-        "https://epg.pw/xmltv/epg_US.xml",
-    ],
-
-    "My-Streams": [
-        "https://epg.pw/xmltv/epg_US.xml",
-    ],
-
-    "NZ": [
-        "https://epg.pw/xmltv/epg_NZ.xml",
-    ],
-
-    "oly": [
-        "https://epg.pw/xmltv/epg_US.xml",
-    ],
-
-    "Sports": [
-        "https://epg.pw/xmltv/epg_US.xml",
-    ],
-
-    "whiplash-epg": [
-        "https://epg.pw/xmltv/epg_US.xml",
     ],
 }
 
@@ -313,12 +259,10 @@ def load_m3u():
 
             if tvg_id:
 
-                source = (
-                    group.split(
-                        " | ",
-                        1
-                    )[0]
-                )
+                source = group.split(
+                    " | ",
+                    1
+                )[0]
 
                 source_channels[
                     source
@@ -330,7 +274,7 @@ def load_m3u():
 
 
 # ============================================================
-# XMLTV PARSER
+# XMLTV
 # ============================================================
 
 def parse_xmltv(data):
@@ -359,49 +303,18 @@ def parse_xmltv(data):
 
 
 # ============================================================
-# NORMALIZED ID MATCHING
-#
-# Some providers use slightly different ID formatting.
-# Keep the original exact match first, then normalized match.
+# ID NORMALIZATION
 # ============================================================
 
 def normalize_id(value):
 
     value = value.strip().lower()
 
-    value = value.replace(
-        " ", ""
-    )
-
-    value = value.replace(
-        "_", ""
-    )
-
-    value = value.replace(
-        "-", ""
-    )
+    value = value.replace(" ", "")
+    value = value.replace("_", "")
+    value = value.replace("-", "")
 
     return value
-
-
-def build_normalized_ids(ids):
-
-    result = {}
-
-    for value in ids:
-
-        normalized = normalize_id(
-            value
-        )
-
-        if normalized:
-
-            result.setdefault(
-                normalized,
-                set()
-            ).add(value)
-
-    return result
 
 
 def calculate_match(
@@ -409,45 +322,48 @@ def calculate_match(
     epg_ids,
 ):
 
-    # Exact matching first.
-    exact_matches = (
+    # Exact match first.
+    matched = (
         m3u_ids & epg_ids
     )
 
-    matched = set(
-        exact_matches
-    )
-
     # Normalized fallback.
-    unmatched_m3u = (
+    remaining = (
         m3u_ids - matched
     )
 
-    if unmatched_m3u:
+    if not remaining:
+        return matched
 
-        epg_normalized = (
-            build_normalized_ids(
-                epg_ids
-            )
+    normalized_epg = {}
+
+    for epg_id in epg_ids:
+
+        normalized = normalize_id(
+            epg_id
         )
 
-        for m3u_id in unmatched_m3u:
+        if normalized:
 
-            normalized = (
-                normalize_id(
-                    m3u_id
-                )
+            normalized_epg.setdefault(
+                normalized,
+                set()
+            ).add(epg_id)
+
+    for m3u_id in remaining:
+
+        normalized = normalize_id(
+            m3u_id
+        )
+
+        if (
+            normalized
+            and normalized in normalized_epg
+        ):
+
+            matched.add(
+                m3u_id
             )
-
-            if (
-                normalized
-                and normalized
-                in epg_normalized
-            ):
-
-                matched.add(
-                    m3u_id
-                )
 
     return matched
 
@@ -462,27 +378,14 @@ def audit_source(
 ):
 
     result = {
-
         "source": source_name,
-
-        "m3u": len(
-            m3u_ids
-        ),
-
+        "m3u": len(m3u_ids),
         "epg": 0,
-
         "matched": 0,
-
-        "missing": len(
-            m3u_ids
-        ),
-
+        "missing": len(m3u_ids),
         "rate": 0.0,
-
         "epg_url": "",
-
         "error": "",
-
         "attempts": [],
     }
 
@@ -499,29 +402,23 @@ def audit_source(
 
         return result
 
-
     for url in urls:
 
         try:
 
             print(
-                f"  Trying EPG: "
-                f"{url}"
+                f"  Trying EPG: {url}"
             )
 
-            data = http_get(
-                url
-            )
+            data = http_get(url)
 
             epg_ids = parse_xmltv(
                 data
             )
 
-            matched_ids = (
-                calculate_match(
-                    m3u_ids,
-                    epg_ids,
-                )
+            matched_ids = calculate_match(
+                m3u_ids,
+                epg_ids,
             )
 
             result["epg"] = len(
@@ -546,19 +443,15 @@ def audit_source(
                 )
 
             result["epg_url"] = url
-
             result["error"] = ""
 
             return result
 
         except Exception as exc:
 
-            result[
-                "attempts"
-            ].append(
+            result["attempts"].append(
                 f"{url} -> {exc}"
             )
-
 
     result["error"] = (
         "All EPG sources failed"
@@ -653,13 +546,8 @@ def write_report(results):
 
             report.write("\n")
 
-            total_m3u += (
-                result["m3u"]
-            )
-
-            total_matched += (
-                result["matched"]
-            )
+            total_m3u += result["m3u"]
+            total_matched += result["matched"]
 
 
         report.write(
@@ -686,18 +574,13 @@ def write_report(results):
             f"{total_matched}\n"
         )
 
-        if total_m3u:
-
-            total_rate = (
-                total_matched
-                / total_m3u
-                * 100
-            )
-
-        else:
-
-            total_rate = 0
-
+        total_rate = (
+            total_matched
+            / total_m3u
+            * 100
+            if total_m3u
+            else 0
+        )
 
         report.write(
             f"MATCH RATE   : "
@@ -712,29 +595,20 @@ def write_report(results):
 def main():
 
     print("=" * 70)
-
-    print(
-        "FAST ALL REGIONS - EPG AUDIT"
-    )
-
+    print("FAST ALL REGIONS - EPG AUDIT")
     print("=" * 70)
-
 
     try:
 
-        source_channels = (
-            load_m3u()
-        )
+        source_channels = load_m3u()
 
     except Exception as exc:
 
         print(
-            f"ERROR reading M3U: "
-            f"{exc}"
+            f"ERROR reading M3U: {exc}"
         )
 
         sys.exit(1)
-
 
     print()
 
@@ -745,9 +619,7 @@ def main():
 
     print()
 
-
     results = []
-
 
     for source_name in sorted(
         source_channels,
@@ -760,41 +632,32 @@ def main():
 
         result = audit_source(
             source_name,
-            source_channels[
-                source_name
-            ],
+            source_channels[source_name],
         )
 
         results.append(
             result
         )
 
-
         print(
-            f"  M3U: "
-            f"{result['m3u']}"
+            f"  M3U: {result['m3u']}"
         )
 
         print(
-            f"  EPG: "
-            f"{result['epg']}"
+            f"  EPG: {result['epg']}"
         )
 
         print(
-            f"  MATCH: "
-            f"{result['matched']}"
+            f"  MATCH: {result['matched']}"
         )
 
         print(
-            f"  NO MATCH: "
-            f"{result['missing']}"
+            f"  NO MATCH: {result['missing']}"
         )
 
         print(
-            f"  RATE: "
-            f"{result['rate']:.2f}%"
+            f"  RATE: {result['rate']:.2f}%"
         )
-
 
         if result["epg_url"]:
 
@@ -803,7 +666,6 @@ def main():
                 f"{result['epg_url']}"
             )
 
-
         if result["error"]:
 
             print(
@@ -811,14 +673,11 @@ def main():
                 f"{result['error']}"
             )
 
-
         print()
-
 
     write_report(
         results
     )
-
 
     print("=" * 70)
 
@@ -834,5 +693,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
