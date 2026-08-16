@@ -8,19 +8,39 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: update-fast-all-regions
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
 
     steps:
 
+      # ==================================================
+      # 1. Checkout latest main
+      # ==================================================
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      # ==================================================
+      # 2. Setup Python
+      # ==================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+
+      # ==================================================
+      # 3. Build playlist
+      # ==================================================
 
       - name: Build playlist
         env:
@@ -28,16 +48,37 @@ jobs:
         run: |
           python scripts/merge_playlists.py
 
+
+      # ==================================================
+      # 4. Commit playlist
+      # ==================================================
+
       - name: Commit updated playlist
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
 
           git add fast-all-regions.m3u
 
+
           if git diff --cached --quiet; then
+
             echo "No playlist changes."
+
           else
-            git commit -m "Update FAST all-regions playlist"
-            git push
+
+            git commit \
+              -m "Update FAST all-regions playlist"
+
+            git fetch origin main
+
+            git rebase origin/main
+
+            git push origin HEAD:main
+
           fi
