@@ -10,10 +10,23 @@ OUTPUT = "fast-all-regions.m3u"
 
 REQUEST_TIMEOUT = 90
 
+# ============================================================
+# GITHUB TOKEN
+# ============================================================
+
+try:
+    import os
+    GITHUB_TOKEN = os.environ.get("GH_TOKEN", "").strip()
+except Exception:
+    GITHUB_TOKEN = ""
+
 API_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "FAST-All-Regions-Builder",
 }
+
+if GITHUB_TOKEN:
+    API_HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 FAST-All-Regions-Builder"
@@ -182,6 +195,7 @@ REGIONS = {
 # ============================================================
 
 def fetch_bytes(url, headers=None):
+
     headers = headers or HTTP_HEADERS
 
     request = urllib.request.Request(
@@ -198,6 +212,7 @@ def fetch_bytes(url, headers=None):
 
 
 def fetch_text(url, headers=None):
+
     return fetch_bytes(
         url,
         headers
@@ -208,6 +223,7 @@ def fetch_text(url, headers=None):
 
 
 def github_json(url):
+
     return json.loads(
         fetch_text(
             url,
@@ -237,12 +253,14 @@ def get_all_repositories():
         )
 
         try:
+
             data = github_json(url)
 
         except Exception as error:
 
             print(
-                f"[ERROR] Cannot read repositories: {error}"
+                f"[ERROR] Cannot read repositories: "
+                f"{error}"
             )
 
             break
@@ -258,13 +276,15 @@ def get_all_repositories():
             if repo.get("archived"):
                 continue
 
-            repositories.append({
-                "name": repo["name"],
-                "default_branch": (
-                    repo.get("default_branch")
-                    or "main"
-                ),
-            })
+            repositories.append(
+                {
+                    "name": repo["name"],
+                    "default_branch": (
+                        repo.get("default_branch")
+                        or "main"
+                    ),
+                }
+            )
 
         if len(data) < 100:
             break
@@ -292,10 +312,14 @@ def get_repository_tree(repo, branch):
         if data.get("truncated"):
 
             print(
-                f"[WARNING] GitHub tree truncated: {repo}"
+                f"[WARNING] GitHub tree is truncated: "
+                f"{repo}"
             )
 
-        return data.get("tree", [])
+        return data.get(
+            "tree",
+            []
+        )
 
     except Exception as error:
 
@@ -325,7 +349,9 @@ def is_playlist(path):
         for p in PurePosixPath(path).parts
     }
 
-    if parts.intersection(IGNORE_PARTS):
+    if parts.intersection(
+        IGNORE_PARTS
+    ):
         return False
 
     return True
@@ -345,10 +371,15 @@ def discover_playlists(repo, branch):
         if item.get("type") != "blob":
             continue
 
-        path = item.get("path", "")
+        path = item.get(
+            "path",
+            ""
+        )
 
-        if is_playlist(path):
-            result.append(path)
+        if not is_playlist(path):
+            continue
+
+        result.append(path)
 
     return sorted(result)
 
@@ -375,8 +406,8 @@ def clean_service_name(repo):
         "airy-playlist-generator": "Airy TV",
         "pluto": "Pluto TV",
         "plex": "Plex",
-        "My-Streams": "My Streams",
         "sports": "Sports",
+        "My-Streams": "My Streams",
         "buddylive": "BuddyLive",
         "buddylive_v2": "BuddyLive",
         "buddylive-combined": "BuddyLive",
@@ -438,9 +469,9 @@ def get_attribute(extinf, attribute):
     return ""
 
 
-def replace_group_title(extinf, group):
+def set_group_title(extinf, group):
 
-    escaped_group = (
+    escaped = (
         group
         .replace("\\", "\\\\")
         .replace('"', '\\"')
@@ -454,7 +485,7 @@ def replace_group_title(extinf, group):
 
         return re.sub(
             r'group-title="[^"]*"',
-            f'group-title="{escaped_group}"',
+            f'group-title="{escaped}"',
             extinf,
             flags=re.IGNORECASE
         )
@@ -466,7 +497,7 @@ def replace_group_title(extinf, group):
 
     return (
         extinf[:comma]
-        + f' group-title="{escaped_group}"'
+        + f' group-title="{escaped}"'
         + extinf[comma:]
     )
 
@@ -500,7 +531,9 @@ def normalize_text(value):
 
 def normalize_region(value):
 
-    value = normalize_text(value)
+    value = normalize_text(
+        value
+    )
 
     compact = value.replace(
         " ",
@@ -517,78 +550,7 @@ def normalize_region(value):
 
 
 # ============================================================
-# REGION FROM FILE NAME ONLY
-# ============================================================
-
-def region_from_filename(path):
-
-    filename = PurePosixPath(path).stem.lower()
-
-    # Examples:
-    # plex_us
-    # plex_gb
-    # samsungtvplus_us
-
-    tokens = re.split(
-        r"[^a-zA-Z]+",
-        filename
-    )
-
-    # Only explicit region token.
-    # NEVER guess.
-
-    for token in reversed(tokens):
-
-        region = normalize_region(
-            token
-        )
-
-        if region:
-            return region
-
-    return ""
-
-
-# ============================================================
-# REGION FROM ORIGINAL GROUP
-# ============================================================
-
-def region_from_group(extinf):
-
-    group = get_attribute(
-        extinf,
-        "group-title"
-    )
-
-    if not group:
-        return ""
-
-    # First inspect the complete group.
-    region = normalize_region(group)
-
-    if region:
-        return region
-
-    # Then inspect group components.
-    pieces = re.split(
-        r"[|>/,;:]+",
-        group
-    )
-
-    for piece in pieces:
-
-        region = normalize_region(
-            piece
-        )
-
-        if region:
-            return region
-
-    return ""
-
-
-# ============================================================
-# REGION FROM M3U METADATA
+# REGION FROM EXPLICIT METADATA
 # ============================================================
 
 def region_from_metadata(extinf):
@@ -617,18 +579,92 @@ def region_from_metadata(extinf):
 
 
 # ============================================================
-# REGION
+# REGION FROM ORIGINAL GROUP
+# ============================================================
+
+def region_from_group(extinf):
+
+    group = get_attribute(
+        extinf,
+        "group-title"
+    )
+
+    if not group:
+        return ""
+
+    # First try the complete group.
+    region = normalize_region(
+        group
+    )
+
+    if region:
+        return region
+
+    # Then inspect pieces of the ORIGINAL category.
+    pieces = re.split(
+        r"[|>/,;:]+",
+        group
+    )
+
+    for piece in pieces:
+
+        region = normalize_region(
+            piece
+        )
+
+        if region:
+            return region
+
+    return ""
+
+
+# ============================================================
+# REGION FROM FILENAME
+# ============================================================
+
+def region_from_filename(path):
+
+    filename = PurePosixPath(
+        path
+    ).stem.lower()
+
+    tokens = re.split(
+        r"[^a-zA-Z]+",
+        filename
+    )
+
+    # Explicit region only.
+    # No guessing.
+
+    for token in reversed(tokens):
+
+        region = normalize_region(
+            token
+        )
+
+        if region:
+            return region
+
+    return ""
+
+
+# ============================================================
+# REGION DETERMINATION
+#
+# Priority:
+#
+# 1. Explicit metadata
+# 2. Explicit original group-title
+# 3. Explicit filename region
+# 4. Global
+#
+# NEVER GUESS.
 # ============================================================
 
 def determine_region(
     extinf,
     path
 ):
-
-    # ========================================================
-    # RULE 1
-    # Explicit country/region metadata.
-    # ========================================================
 
     region = region_from_metadata(
         extinf
@@ -637,25 +673,12 @@ def determine_region(
     if region:
         return region
 
-    # ========================================================
-    # RULE 2
-    # Explicit region inside original group-title.
-    # ========================================================
-
     region = region_from_group(
         extinf
     )
 
     if region:
         return region
-
-    # ========================================================
-    # RULE 3
-    # Explicit region in filename.
-    #
-    # IMPORTANT:
-    # We DO NOT infer anything from service name.
-    # ========================================================
 
     region = region_from_filename(
         path
@@ -664,15 +687,24 @@ def determine_region(
     if region:
         return region
 
-    # ========================================================
-    # RULE 4
-    #
-    # No explicit region.
-    #
-    # NEVER GUESS.
-    # ========================================================
-
     return "Global"
+
+
+# ============================================================
+# GROUP
+# ============================================================
+
+def build_group(
+    service,
+    region
+):
+
+    if not region:
+        region = "Global"
+
+    return (
+        f"{service} | {region}"
+    )
 
 
 # ============================================================
@@ -745,6 +777,72 @@ def get_channel_name(extinf):
 
 
 # ============================================================
+# SOURCE PRIORITY
+#
+# This affects only identical URL duplicates.
+# It does NOT remove different URLs.
+# ============================================================
+
+SOURCE_PRIORITY = {
+    "samsungtvplus": 100,
+    "lg-playlist-generator": 100,
+    "lg-playlist-generator2": 95,
+    "tcl-playlist-generator": 100,
+    "xumo-playlist-generator": 100,
+    "roku-playlist-generator": 100,
+    "tubi-scraper": 100,
+    "pluto": 100,
+    "plex": 100,
+    "plex-alt-fast-channels": 95,
+    "RakutenTV": 100,
+    "distro-playlist-generator": 100,
+    "airy-playlist-generator": 100,
+    "localnow-playlist-generator": 100,
+    "My-Streams": 90,
+    "buddylive": 90,
+    "buddylive_v2": 90,
+    "buddylive-combined": 85,
+    "app-m3u-generator": 50,
+    "sports": 100,
+    "nz": 100,
+}
+
+
+# ============================================================
+# CHANNEL NAME NORMALIZATION
+# ============================================================
+
+def normalize_channel_name(name):
+
+    name = unquote(
+        name or ""
+    )
+
+    name = name.lower()
+
+    name = re.sub(
+        r"\b(4k|uhd|fhd|hd|sd)\b",
+        "",
+        name,
+        flags=re.IGNORECASE
+    )
+
+    name = re.sub(
+        r"[^a-z0-9\u0080-\uffff]+",
+        " ",
+        name
+    )
+
+    name = re.sub(
+        r"\s+",
+        " ",
+        name
+    )
+
+    return name.strip()
+
+
+# ============================================================
 # BUILD
 # ============================================================
 
@@ -754,6 +852,15 @@ def main():
     print("=" * 70)
     print("FAST ALL REGIONS - CLEAN BUILDER")
     print("=" * 70)
+
+    if GITHUB_TOKEN:
+        print(
+            "GitHub API authentication: ENABLED"
+        )
+    else:
+        print(
+            "GitHub API authentication: DISABLED"
+        )
 
     repositories = (
         get_all_repositories()
@@ -771,7 +878,7 @@ def main():
     repository_stats = {}
 
     # ========================================================
-    # REPOSITORIES
+    # DISCOVER AND DOWNLOAD
     # ========================================================
 
     for repo_info in repositories:
@@ -818,10 +925,21 @@ def main():
 
         for path in playlist_paths:
 
+            # =================================================
+            # IMPORTANT:
+            # Branch MUST be included here.
+            #
+            # Correct:
+            # OWNER / repo / branch / path
+            #
+            # This fixes the 404 problem.
+            # =================================================
+
             raw_url = (
                 "https://raw.githubusercontent.com/"
                 f"{OWNER}/"
                 f"{quote(repo, safe='')}/"
+                f"{quote(branch, safe='/')}/"
                 f"{quote(path, safe='/')}"
             )
 
@@ -845,14 +963,6 @@ def main():
                     entries
                 )
 
-                # Explicit region associated
-                # with the FILE.
-                file_region = (
-                    region_from_filename(
-                        path
-                    )
-                )
-
                 for extinf, stream_url in entries:
 
                     stream_url = (
@@ -862,56 +972,57 @@ def main():
                     if not stream_url:
                         continue
 
-                    # =================================================
-                    # REGION PRIORITY
-                    #
-                    # 1. channel metadata
-                    # 2. original group
-                    # 3. filename
-                    # 4. Global
-                    #
-                    # Never guess.
-                    # =================================================
-
-                    region = (
-                        determine_region(
-                            extinf,
-                            path
+                    channel_name = (
+                        get_channel_name(
+                            extinf
                         )
                     )
 
-                    # =================================================
-                    # IMPORTANT FOR *_ALL FILES
-                    #
-                    # If the filename is "all", do NOT force
-                    # a country. Each channel keeps its own
-                    # explicit region if present.
-                    #
-                    # Otherwise Global.
-                    # =================================================
+                    if not channel_name:
+                        continue
 
-                    final_group = (
-                        f"{service} | {region}"
+                    # -----------------------------------------
+                    # REGION
+                    # -----------------------------------------
+
+                    region = determine_region(
+                        extinf,
+                        path
+                    )
+
+                    # -----------------------------------------
+                    # CATEGORY
+                    #
+                    # ONLY:
+                    # Service | Region
+                    # -----------------------------------------
+
+                    final_group = build_group(
+                        service,
+                        region
                     )
 
                     new_extinf = (
-                        replace_group_title(
+                        set_group_title(
                             extinf,
                             final_group
                         )
                     )
 
-                    all_entries.append({
-                        "extinf": new_extinf,
-                        "url": stream_url,
-                        "service": service,
-                        "region": region,
-                        "name": (
-                            get_channel_name(
-                                extinf
-                            )
-                        ),
-                    })
+                    all_entries.append(
+                        {
+                            "extinf": new_extinf,
+                            "url": stream_url,
+                            "service": service,
+                            "region": region,
+                            "name": channel_name,
+                            "repo": repo,
+                            "priority": SOURCE_PRIORITY.get(
+                                repo,
+                                50
+                            ),
+                        }
+                    )
 
             except Exception as error:
 
@@ -942,23 +1053,17 @@ def main():
     # ========================================================
     # DEDUPLICATION
     #
-    # ONLY URL.
+    # ONLY IDENTICAL STREAM URLS ARE REMOVED.
     #
-    # This prevents the same stream from appearing multiple
-    # times because of Plex/FAST Apps duplicate repositories,
-    # while preserving different streams.
+    # Different URLs remain, even if channel names match.
     # ========================================================
 
     print()
     print(
-        "Removing duplicate URLs..."
+        "Removing duplicate streams..."
     )
 
-    seen_urls = set()
-
-    unique_entries = []
-
-    duplicate_count = 0
+    best_by_url = {}
 
     for entry in all_entries:
 
@@ -968,18 +1073,32 @@ def main():
             .lower()
         )
 
-        if url_key in seen_urls:
-
-            duplicate_count += 1
-            continue
-
-        seen_urls.add(
+        existing = best_by_url.get(
             url_key
         )
 
-        unique_entries.append(
-            entry
-        )
+        if existing is None:
+
+            best_by_url[
+                url_key
+            ] = entry
+
+            continue
+
+        if entry["priority"] > existing["priority"]:
+
+            best_by_url[
+                url_key
+            ] = entry
+
+    unique_entries = list(
+        best_by_url.values()
+    )
+
+    duplicate_count = (
+        len(all_entries)
+        - len(unique_entries)
+    )
 
     # ========================================================
     # SORT
@@ -993,14 +1112,14 @@ def main():
             normalize_text(
                 item["region"]
             ),
-            normalize_text(
+            normalize_channel_name(
                 item["name"]
             ),
         )
     )
 
     # ========================================================
-    # WRITE
+    # WRITE M3U
     # ========================================================
 
     with open(
@@ -1027,7 +1146,24 @@ def main():
             )
 
     # ========================================================
-    # REPORT
+    # CATEGORY REPORT
+    # ========================================================
+
+    categories = defaultdict(int)
+
+    for entry in unique_entries:
+
+        category = (
+            f"{entry['service']} | "
+            f"{entry['region']}"
+        )
+
+        categories[
+            category
+        ] += 1
+
+    # ========================================================
+    # FINAL REPORT
     # ========================================================
 
     print()
@@ -1046,13 +1182,18 @@ def main():
     )
 
     print(
-        f"Unique URLs: "
+        f"Unique streams: "
         f"{len(unique_entries)}"
     )
 
     print(
-        f"Duplicate URLs removed: "
+        f"Duplicates removed: "
         f"{duplicate_count}"
+    )
+
+    print(
+        f"Categories: "
+        f"{len(categories)}"
     )
 
     print(
@@ -1062,7 +1203,15 @@ def main():
 
     print()
     print(
-        "GROUP FORMAT: Service | Region"
+        "Stream health checks: DISABLED"
+    )
+
+    print(
+        "Offline/temporary streams: KEPT"
+    )
+
+    print(
+        "Categories: SERVICE | REGION"
     )
 
     print(
@@ -1074,8 +1223,33 @@ def main():
     )
 
     print(
-        "STREAM HEALTH CHECKS: DISABLED"
+        "Repository discovery: DYNAMIC"
     )
+
+    # ========================================================
+    # CATEGORY SUMMARY
+    # ========================================================
+
+    print()
+    print(
+        "CATEGORY SUMMARY"
+    )
+
+    print(
+        "-" * 70
+    )
+
+    for category, count in sorted(
+        categories.items(),
+        key=lambda x: normalize_text(
+            x[0]
+        )
+    ):
+
+        print(
+            f"{category}: "
+            f"{count}"
+        )
 
     # ========================================================
     # SOURCE SUMMARY
@@ -1104,7 +1278,7 @@ def main():
         )
 
     # ========================================================
-    # FAILURES
+    # FAILED FILES
     # ========================================================
 
     if failed_files:
