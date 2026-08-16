@@ -1,4 +1,4 @@
-name: Generate EPG
+name: Generate Optimized EPG
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: "30 */6 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   epg:
@@ -14,9 +14,17 @@ jobs:
 
     steps:
 
+      # ==================================================
+      # 1. Checkout
+      # ==================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
+
+      # ==================================================
+      # 2. Setup Python
+      # ==================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -24,10 +32,9 @@ jobs:
           python-version: "3.12"
 
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-
+      # ==================================================
+      # 3. Download EPG sources
+      # ==================================================
 
       - name: Download EPG sources
         run: |
@@ -43,7 +50,7 @@ jobs:
 
           USER_AGENT = (
               "Mozilla/5.0 "
-              "(compatible; FAST-EPG/4.0)"
+              "(compatible; FAST-EPG/5.0)"
           )
 
 
@@ -129,7 +136,7 @@ jobs:
 
               with urllib.request.urlopen(
                   request,
-                  timeout=120,
+                  timeout=120
               ) as response:
 
                   return response.read()
@@ -139,7 +146,7 @@ jobs:
 
               success = False
 
-              for index, url in enumerate(urls):
+              for url in urls:
 
                   print("")
                   print("=" * 70)
@@ -151,34 +158,39 @@ jobs:
 
                       data = download(url)
 
-                      # Validate gzip if necessary
                       if data[:2] == b"\x1f\x8b":
 
-                          print("Detected gzip")
+                          print(
+                              "Detected gzip"
+                          )
 
-                          # Keep XML uncompressed
                           data = gzip.decompress(
                               data
                           )
 
-                      # Basic XMLTV validation
+
+                      preview = data[:10000]
+
                       if (
-                          b"<tv" not in data[:5000]
+                          b"<tv" not in preview
                           and
-                          b"<channel" not in data[:5000]
+                          b"<channel" not in preview
                       ):
 
                           raise RuntimeError(
-                              "Downloaded file does not "
-                              "look like XMLTV"
+                              "Not XMLTV"
                           )
+
 
                       output = (
                           Path("epg_sources")
                           / f"{name}.xml"
                       )
 
-                      output.write_bytes(data)
+                      output.write_bytes(
+                          data
+                      )
+
 
                       print(
                           "Downloaded:",
@@ -194,6 +206,7 @@ jobs:
                       success = True
                       break
 
+
                   except Exception as exc:
 
                       print(
@@ -201,12 +214,13 @@ jobs:
                           exc
                       )
 
+
               if not success:
 
                   print(
                       "WARNING:",
                       name,
-                      "could not be downloaded"
+                      "failed"
                   )
 
           PY
@@ -214,14 +228,29 @@ jobs:
           python download_epg.py
 
 
-      - name: Build combined XMLTV
+      # ==================================================
+      # 4. Build optimized EPG
+      # ==================================================
+
+      - name: Build optimized EPG
         run: |
 
-          cat > combine_epg.py <<'PY'
+          cat > optimize_epg.py <<'PY'
 
+          import gzip
+          import re
           import xml.etree.ElementTree as ET
+
+          from datetime import datetime
+          from datetime import timedelta
+          from datetime import timezone
+
           from pathlib import Path
 
+
+          M3U_FILE = Path(
+              "fast-all-regions.m3u"
+          )
 
           SOURCE_DIR = Path(
               "epg_sources"
@@ -231,17 +260,244 @@ jobs:
               "epg.xml"
           )
 
+          GZIP_OUTPUT = Path(
+              "epg.xml.gz"
+          )
 
-          root = ET.Element("tv")
+
+          # ==================================================
+          # Helpers
+          # ==================================================
+
+          def normalize(text):
+
+              if not text:
+                  return ""
+
+              return re.sub(
+                  r"[^a-zA-Z0-9]+",
+                  "",
+                  text.lower()
+              )
+
+
+          def parse_time(value):
+
+              if not value:
+                  return None
+
+              try:
+
+                  value = value.strip()
+
+                  # XMLTV:
+                  # 20260816120000 +0000
+
+                  match = re.match(
+                      r"^(\d{14})\s*([+-]\d{4})?",
+                      value
+                  )
+
+                  if not match:
+                      return None
+
+                  dt = datetime.strptime(
+                      match.group(1),
+                      "%Y%m%d%H%M%S"
+                  )
+
+                  offset = match.group(2)
+
+                  if offset:
+
+                      sign = (
+                          1
+                          if offset[0] == "+"
+                          else -1
+                      )
+
+                      hours = int(
+                          offset[1:3]
+                      )
+
+                      minutes = int(
+                          offset[3:5]
+                      )
+
+                      tz = timezone(
+                          sign * timedelta(
+                              hours=hours,
+                              minutes=minutes
+                          )
+                      )
+
+                      dt = dt.replace(
+                          tzinfo=tz
+                      )
+
+                  else:
+
+                      dt = dt.replace(
+                          tzinfo=timezone.utc
+                      )
+
+                  return dt
+
+              except Exception:
+
+                  return None
+
+
+          # ==================================================
+          # 1. Read M3U
+          # ==================================================
+
+          print("=" * 70)
+          print("READING M3U")
+          print("=" * 70)
+
+
+          m3u_text = M3U_FILE.read_text(
+              encoding="utf-8",
+              errors="ignore"
+          )
+
+
+          wanted_ids = set()
+          wanted_names = set()
+
+
+          for line in m3u_text.splitlines():
+
+              if not line.startswith(
+                  "#EXTINF"
+              ):
+                  continue
+
+
+              # ----------------------------------------------
+              # tvg-id
+              # ----------------------------------------------
+
+              match = re.search(
+                  r'tvg-id="([^"]+)"',
+                  line,
+                  re.I
+              )
+
+              if match:
+
+                  value = (
+                      match.group(1)
+                      .strip()
+                  )
+
+                  if value:
+
+                      wanted_ids.add(
+                          value
+                      )
+
+
+              # ----------------------------------------------
+              # channel name
+              # ----------------------------------------------
+
+              if "," in line:
+
+                  name = line.split(
+                      ",",
+                      1
+                  )[1].strip()
+
+                  normalized = normalize(
+                      name
+                  )
+
+                  if normalized:
+
+                      wanted_names.add(
+                          normalized
+                      )
+
+
+          print(
+              "M3U tvg-id:",
+              len(wanted_ids)
+          )
+
+          print(
+              "M3U names:",
+              len(wanted_names)
+          )
+
+
+          # ==================================================
+          # 2. Date window
+          # ==================================================
+
+          now = datetime.now(
+              timezone.utc
+          )
+
+
+          # Keep programs from 7 days ago
+          # to 14 days in the future
+
+          minimum_time = (
+              now -
+              timedelta(days=7)
+          )
+
+          maximum_time = (
+              now +
+              timedelta(days=14)
+          )
+
+
+          print("")
+          print(
+              "Keep programmes:"
+          )
+
+          print(
+              minimum_time.isoformat()
+          )
+
+          print(
+              "to"
+          )
+
+          print(
+              maximum_time.isoformat()
+          )
+
+
+          # ==================================================
+          # 3. Root
+          # ==================================================
+
+          root = ET.Element(
+              "tv"
+          )
 
 
           seen_channels = set()
 
-          total_channels = 0
-          total_programmes = 0
+          matched_channels = 0
 
-          successful_sources = 0
+          kept_programmes = 0
 
+          duplicate_programmes = 0
+
+          old_programmes = 0
+
+          future_programmes = 0
+
+
+          # ==================================================
+          # 4. Process EPG sources
+          # ==================================================
 
           for file in sorted(
               SOURCE_DIR.glob("*.xml")
@@ -249,95 +505,335 @@ jobs:
 
               print("")
               print("=" * 70)
-              print("PROCESSING:", file)
+              print(
+                  "PROCESSING:",
+                  file
+              )
               print("=" * 70)
+
 
               try:
 
-                  tree = ET.parse(file)
+                  tree = ET.parse(
+                      file
+                  )
 
                   source_root = (
                       tree.getroot()
                   )
 
-                  source_channels = 0
-                  source_programmes = 0
-
-
-                  # ----------------------------------------
-                  # Channels
-                  # ----------------------------------------
-
-                  for channel in source_root.findall(
-                      ".//channel"
-                  ):
-
-                      channel_id = (
-                          channel.get("id")
-                      )
-
-                      if not channel_id:
-                          continue
-
-                      if channel_id in seen_channels:
-                          continue
-
-                      seen_channels.add(
-                          channel_id
-                      )
-
-                      root.append(
-                          channel
-                      )
-
-                      source_channels += 1
-                      total_channels += 1
-
-
-                  # ----------------------------------------
-                  # Programmes
-                  # ----------------------------------------
-
-                  for programme in source_root.findall(
-                      ".//programme"
-                  ):
-
-                      root.append(
-                          programme
-                      )
-
-                      source_programmes += 1
-                      total_programmes += 1
-
-
-                  successful_sources += 1
-
-
-                  print(
-                      "Channels:",
-                      source_channels
-                  )
-
-                  print(
-                      "Programmes:",
-                      source_programmes
-                  )
-
               except Exception as exc:
 
                   print(
-                      "ERROR:",
+                      "SKIPPED:",
                       exc
                   )
 
+                  continue
 
-          # --------------------------------------------
-          # XML declaration
-          # --------------------------------------------
+
+              # ------------------------------------------------
+              # Find matching channels
+              # ------------------------------------------------
+
+              matching_ids = set()
+
+
+              for channel in source_root.findall(
+                  ".//channel"
+              ):
+
+                  cid = channel.get(
+                      "id"
+                  )
+
+                  if not cid:
+                      continue
+
+
+                  names = []
+
+                  for display in channel.findall(
+                      "display-name"
+                  ):
+
+                      if display.text:
+
+                          names.append(
+                              normalize(
+                                  display.text
+                              )
+                          )
+
+
+                  matched = False
+
+
+                  if cid in wanted_ids:
+
+                      matched = True
+
+
+                  if (
+                      not matched
+                      and
+                      set(names)
+                      &
+                      wanted_names
+                  ):
+
+                      matched = True
+
+
+                  if not matched:
+
+                      continue
+
+
+                  matching_ids.add(
+                      cid
+                  )
+
+
+                  # --------------------------------------------
+                  # Keep only one channel definition
+                  # --------------------------------------------
+
+                  if cid in seen_channels:
+
+                      continue
+
+
+                  seen_channels.add(
+                      cid
+                  )
+
+
+                  new_channel = ET.Element(
+                      "channel",
+                      {
+                          "id": cid
+                      }
+                  )
+
+
+                  # Only first display name
+                  display = (
+                      channel.find(
+                          "display-name"
+                      )
+                  )
+
+
+                  if (
+                      display is not None
+                      and
+                      display.text
+                  ):
+
+                      d = ET.SubElement(
+                          new_channel,
+                          "display-name"
+                      )
+
+                      d.text = (
+                          display.text
+                          .strip()
+                      )
+
+
+                  root.append(
+                      new_channel
+                  )
+
+
+                  matched_channels += 1
+
+
+              # ------------------------------------------------
+              # Programmes
+              # ------------------------------------------------
+
+              for programme in source_root.findall(
+                  ".//programme"
+              ):
+
+                  cid = programme.get(
+                      "channel"
+                  )
+
+
+                  if cid not in matching_ids:
+
+                      continue
+
+
+                  start_raw = programme.get(
+                      "start"
+                  )
+
+                  stop_raw = programme.get(
+                      "stop"
+                  )
+
+
+                  start = parse_time(
+                      start_raw
+                  )
+
+                  stop = parse_time(
+                      stop_raw
+                  )
+
+
+                  if start is None:
+
+                      continue
+
+
+                  # --------------------------------------------
+                  # Date filtering
+                  # --------------------------------------------
+
+                  if start < minimum_time:
+
+                      old_programmes += 1
+
+                      continue
+
+
+                  if start > maximum_time:
+
+                      future_programmes += 1
+
+                      continue
+
+
+                  # --------------------------------------------
+                  # Title required
+                  # --------------------------------------------
+
+                  title = programme.find(
+                      "title"
+                  )
+
+
+                  if (
+                      title is None
+                      or
+                      not title.text
+                  ):
+
+                      continue
+
+
+                  title_text = (
+                      title.text
+                      .strip()
+                  )
+
+
+                  if not title_text:
+
+                      continue
+
+
+                  # --------------------------------------------
+                  # Duplicate key
+                  # --------------------------------------------
+
+                  duplicate_key = (
+                      cid,
+                      start_raw,
+                      stop_raw,
+                      title_text
+                  )
+
+
+                  # Store globally
+                  if not hasattr(
+                      root,
+                      "_dummy"
+                  ):
+
+                      pass
+
+
+                  # We use a separate set
+                  if "seen_programmes" not in globals():
+
+                      seen_programmes = set()
+
+
+                  if duplicate_key in seen_programmes:
+
+                      duplicate_programmes += 1
+
+                      continue
+
+
+                  seen_programmes.add(
+                      duplicate_key
+                  )
+
+
+                  # --------------------------------------------
+                  # Minimal programme
+                  # --------------------------------------------
+
+                  attrs = {
+                      "channel": cid,
+                      "start": start_raw
+                  }
+
+
+                  if stop_raw:
+
+                      attrs[
+                          "stop"
+                      ] = stop_raw
+
+
+                  new_programme = ET.Element(
+                      "programme",
+                      attrs
+                  )
+
+
+                  # Only title
+                  new_title = ET.SubElement(
+                      new_programme,
+                      "title"
+                  )
+
+
+                  new_title.text = (
+                      title_text
+                  )
+
+
+                  root.append(
+                      new_programme
+                  )
+
+
+                  kept_programmes += 1
+
+
+          # ==================================================
+          # 5. Write XML
+          # ==================================================
+
+          print("")
+          print("=" * 70)
+          print("WRITING OPTIMIZED EPG")
+          print("=" * 70)
+
 
           tree = ET.ElementTree(
               root
           )
+
 
           tree.write(
               OUTPUT,
@@ -346,41 +842,105 @@ jobs:
           )
 
 
-          print("")
-          print("=" * 70)
-          print("FINAL EPG")
-          print("=" * 70)
+          # ==================================================
+          # 6. GZIP
+          # ==================================================
 
           print(
-              "Sources:",
-              successful_sources
+              "Creating gzip..."
           )
+
+
+          with open(
+              OUTPUT,
+              "rb"
+          ) as source:
+
+              with gzip.open(
+                  GZIP_OUTPUT,
+                  "wb",
+                  compresslevel=9
+              ) as target:
+
+                  target.write(
+                      source.read()
+                  )
+
+
+          xml_size = (
+              OUTPUT.stat().st_size
+              /
+              1024
+              /
+              1024
+          )
+
+
+          gzip_size = (
+              GZIP_OUTPUT.stat().st_size
+              /
+              1024
+              /
+              1024
+          )
+
+
+          print("")
+          print("=" * 70)
+          print("FINAL RESULT")
+          print("=" * 70)
 
           print(
               "Channels:",
-              total_channels
+              matched_channels
           )
 
           print(
               "Programmes:",
-              total_programmes
+              kept_programmes
           )
 
           print(
-              "Output:",
-              OUTPUT
+              "Old removed:",
+              old_programmes
           )
 
           print(
-              "Size:",
-              OUTPUT.stat().st_size,
-              "bytes"
+              "Future removed:",
+              future_programmes
+          )
+
+          print(
+              "Duplicates removed:",
+              duplicate_programmes
+          )
+
+          print(
+              "XML:",
+              round(
+                  xml_size,
+                  2
+              ),
+              "MB"
+          )
+
+          print(
+              "GZIP:",
+              round(
+                  gzip_size,
+                  2
+              ),
+              "MB"
           )
 
           PY
 
-          python combine_epg.py
+          python optimize_epg.py
 
+
+      # ==================================================
+      # 5. Validate XML
+      # ==================================================
 
       - name: Validate EPG
         run: |
@@ -391,7 +951,9 @@ jobs:
 
           file = "epg.xml"
 
-          tree = ET.parse(file)
+          tree = ET.parse(
+              file
+          )
 
           root = tree.getroot()
 
@@ -402,6 +964,7 @@ jobs:
           programmes = root.findall(
               ".//programme"
           )
+
 
           print("")
           print("=" * 70)
@@ -423,20 +986,27 @@ jobs:
               len(programmes)
           )
 
+
           if root.tag != "tv":
+
               raise SystemExit(
-                  "Invalid XMLTV root"
+                  "INVALID XMLTV ROOT"
               )
+
 
           if not channels:
+
               raise SystemExit(
-                  "No channels found"
+                  "NO CHANNELS FOUND"
               )
 
+
           if not programmes:
-              print(
-                  "WARNING: No programmes found"
+
+              raise SystemExit(
+                  "NO PROGRAMMES FOUND"
               )
+
 
           print(
               "EPG XML VALID"
@@ -445,11 +1015,19 @@ jobs:
           PY
 
 
+      # ==================================================
+      # 6. EPG Audit
+      # ==================================================
+
       - name: Run EPG audit
         run: |
 
           python scripts/epg_audit.py
 
+
+      # ==================================================
+      # 7. Upload optimized XML
+      # ==================================================
 
       - name: Upload EPG XML
         uses: actions/upload-artifact@v4
@@ -459,7 +1037,23 @@ jobs:
           if-no-files-found: error
 
 
-      - name: Upload EPG audit report
+      # ==================================================
+      # 8. Upload compressed EPG
+      # ==================================================
+
+      - name: Upload compressed EPG
+        uses: actions/upload-artifact@v4
+        with:
+          name: epg-xml-gz
+          path: epg.xml.gz
+          if-no-files-found: error
+
+
+      # ==================================================
+      # 9. Upload audit
+      # ==================================================
+
+      - name: Upload EPG audit
         uses: actions/upload-artifact@v4
         with:
           name: epg-audit-report
