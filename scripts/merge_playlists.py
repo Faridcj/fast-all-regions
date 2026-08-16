@@ -31,7 +31,121 @@ PLAYLIST_EXTENSIONS = (
 
 
 # ============================================================
-# HTTP
+# SPECIAL SOURCE EXCEPTIONS
+#
+# THESE SOURCES ARE NEVER ALLOWED TO USE THEIR ORIGINAL
+# group-title.
+#
+# Their FINAL group-title is ALWAYS exactly the value below.
+# ============================================================
+
+SPECIAL_SOURCE_GROUPS = {
+
+    # App M3U
+    "app-m3u-generator":
+        "App M3U",
+
+    # Buddy Live family
+    "buddylive":
+        "Buddy Live",
+
+    "buddylive-combined":
+        "Buddy Live",
+
+    "buddylive_v2":
+        "Buddy Live",
+
+    # My-Streams
+    "My-Streams":
+        "My-Streams",
+}
+
+
+# ============================================================
+# SOURCE DISPLAY NAMES
+# ============================================================
+
+SOURCE_NAMES = {
+
+    "airy-playlist-generator":
+        "Airy",
+
+    "app-m3u-generator":
+        "App M3U",
+
+    "buddy-moj-scanner":
+        "Buddy MOJ",
+
+    "buddylive":
+        "Buddy Live",
+
+    "buddylive-combined":
+        "Buddy Live",
+
+    "buddylive_v2":
+        "Buddy Live",
+
+    "distro-playlist-generator":
+        "DistroTV",
+
+    "dlxes":
+        "dlxes",
+
+    "lg-playlist-generator":
+        "LG",
+
+    "lg-playlist-generator2":
+        "LG",
+
+    "My-Streams":
+        "My-Streams",
+
+    "nz":
+        "NZ",
+
+    "oly":
+        "Oly",
+
+    "plex":
+        "Plex",
+
+    "plex-alt-fast-channels":
+        "Plex",
+
+    "pluto":
+        "Pluto TV",
+
+    "RakutenTV":
+        "Rakuten TV",
+
+    "roku-playlist-generator":
+        "Roku",
+
+    "samsungtvplus":
+        "Samsung TV Plus",
+
+    "sports":
+        "Sports",
+
+    "tcl-playlist-generator":
+        "TCL",
+
+    "tubi-scraper":
+        "Tubi",
+
+    "vod":
+        "VOD",
+
+    "whiplash-epg":
+        "Whiplash",
+
+    "xumo-playlist-generator":
+        "Xumo",
+}
+
+
+# ============================================================
+# HTTP HELPERS
 # ============================================================
 
 def http_get(url, timeout=45, retries=3):
@@ -145,6 +259,7 @@ def github_api(path, retries=3):
                 )
 
                 if remaining == "0":
+
                     raise RuntimeError(
                         "GitHub API rate limit exceeded"
                     )
@@ -174,90 +289,12 @@ def github_api(path, retries=3):
 
 
 # ============================================================
-# SOURCE NAME NORMALIZATION
+# SOURCE NAME
 # ============================================================
 
 def normalize_source_name(repo_name):
 
-    mapping = {
-
-        "airy-playlist-generator":
-            "Airy",
-
-        "app-m3u-generator":
-            "App M3U",
-
-        "buddy-moj-scanner":
-            "Buddy MOJ",
-
-        "buddylive":
-            "Buddy Live",
-
-        "buddylive-combined":
-            "Buddy Live",
-
-        "buddylive_v2":
-            "Buddy Live",
-
-        "distro-playlist-generator":
-            "DistroTV",
-
-        "dlxes":
-            "dlxes",
-
-        "lg-playlist-generator":
-            "LG",
-
-        "lg-playlist-generator2":
-            "LG",
-
-        "My-Streams":
-            "My-Streams",
-
-        "nz":
-            "NZ",
-
-        "oly":
-            "Oly",
-
-        "plex":
-            "Plex",
-
-        "plex-alt-fast-channels":
-            "Plex",
-
-        "pluto":
-            "Pluto TV",
-
-        "RakutenTV":
-            "Rakuten TV",
-
-        "roku-playlist-generator":
-            "Roku",
-
-        "samsungtvplus":
-            "Samsung TV Plus",
-
-        "sports":
-            "Sports",
-
-        "tcl-playlist-generator":
-            "TCL",
-
-        "tubi-scraper":
-            "Tubi",
-
-        "vod":
-            "VOD",
-
-        "whiplash-epg":
-            "Whiplash",
-
-        "xumo-playlist-generator":
-            "Xumo",
-    }
-
-    return mapping.get(
+    return SOURCE_NAMES.get(
         repo_name,
         repo_name
     )
@@ -312,66 +349,54 @@ def get_first_level_group(group):
 
 
 # ============================================================
-# FINAL GROUP RULES
+# FINAL GROUP
 # ============================================================
 
 def get_final_group(
     repo_name,
     original_group
 ):
+    """
+    FINAL CATEGORY DECISION.
+
+    IMPORTANT:
+
+    The SPECIAL SOURCE EXCEPTION is evaluated FIRST.
+
+    For:
+
+        app-m3u-generator
+        buddylive
+        buddylive-combined
+        buddylive_v2
+        My-Streams
+
+    the original group-title is completely ignored.
+
+    No first-level parsing.
+    No second-level parsing.
+    No cleanup.
+    No source/category combination.
+
+    The returned group is always exactly:
+
+        App M3U
+        Buddy Live
+        My-Streams
+    """
 
     # ========================================================
-    # APP M3U
-    #
-    # ABSOLUTE RULE:
-    #
-    # Whatever the original group-title says,
-    # the output MUST be exactly:
-    #
-    # App M3U
-    #
-    # This prevents things like:
-    #
-    # APP M3U UNITED STATES CHANNEL-ID =...
-    #
-    # from ever becoming categories.
+    # ABSOLUTE EXCEPTION
     # ========================================================
 
-    if repo_name == "app-m3u-generator":
+    if repo_name in SPECIAL_SOURCE_GROUPS:
 
-        return "App M3U"
-
-
-    # ========================================================
-    # BUDDY LIVE
-    #
-    # All Buddy Live repositories are one category.
-    # ========================================================
-
-    if repo_name in (
-        "buddylive",
-        "buddylive-combined",
-        "buddylive_v2",
-    ):
-
-        return "Buddy Live"
-
+        return SPECIAL_SOURCE_GROUPS[
+            repo_name
+        ]
 
     # ========================================================
-    # MY-STREAMS
-    #
-    # All My-Streams playlists are one category.
-    # ========================================================
-
-    if repo_name == "My-Streams":
-
-        return "My-Streams"
-
-
-    # ========================================================
-    # ALL OTHER REPOSITORIES
-    #
-    # Source | first-level original group
+    # NORMAL SOURCES
     # ========================================================
 
     source = normalize_source_name(
@@ -489,7 +514,7 @@ def parse_m3u(text):
 
 
 # ============================================================
-# GITHUB REPOSITORY DISCOVERY
+# GITHUB REPOSITORIES
 # ============================================================
 
 def discover_repositories():
@@ -535,7 +560,7 @@ def discover_repositories():
 
 
 # ============================================================
-# PLAYLIST DISCOVERY
+# PLAYLIST FILES
 # ============================================================
 
 def discover_playlist_files(repo_name):
@@ -596,7 +621,7 @@ def discover_playlist_files(repo_name):
 
 
 # ============================================================
-# RAW GITHUB URL
+# RAW URL
 # ============================================================
 
 def raw_url(
@@ -629,7 +654,7 @@ def raw_url(
 
 
 # ============================================================
-# EXTINF REBUILDER
+# EXTINF OUTPUT
 # ============================================================
 
 def rebuild_extinf(
@@ -642,11 +667,9 @@ def rebuild_extinf(
     )
 
     # ========================================================
-    # CRITICAL:
+    # ALWAYS overwrite group-title.
     #
-    # Always overwrite the original group-title.
-    #
-    # No source group-title survives.
+    # The original group-title can NEVER survive.
     # ========================================================
 
     attributes["group-title"] = (
@@ -683,19 +706,15 @@ def rebuild_extinf(
         for key in ordered_keys
     )
 
-    channel_name = entry[
-        "name"
-    ]
-
     return (
         "#EXTINF:-1 "
         f"{attribute_string},"
-        f"{channel_name}"
+        f"{entry['name']}"
     )
 
 
 # ============================================================
-# MAIN BUILD
+# BUILD
 # ============================================================
 
 def build():
@@ -723,20 +742,26 @@ def build():
         "FIRST LEVEL ONLY"
     )
 
+    print()
     print(
-        "SPECIAL GROUP RULES:"
+        "SPECIAL SOURCE EXCEPTIONS:"
     )
 
     print(
-        "  App M3U -> App M3U"
+        "  App M3U       -> App M3U"
     )
 
     print(
-        "  Buddy Live -> Buddy Live"
+        "  Buddy Live     -> Buddy Live"
     )
 
     print(
-        "  My-Streams -> My-Streams"
+        "  My-Streams     -> My-Streams"
+    )
+
+    print()
+    print(
+        "These sources IGNORE original group-title."
     )
 
     print(
@@ -752,21 +777,19 @@ def build():
     )
 
     print(
-        "Duplicate detection: "
-        "STREAM URL"
+        "Duplicate detection: STREAM URL"
     )
 
     print()
 
     print(
-        "GitHub API authentication: "
-        "DISABLED"
+        "GitHub API authentication: DISABLED"
     )
 
     print()
 
     # ========================================================
-    # DISCOVER REPOSITORIES
+    # DISCOVER
     # ========================================================
 
     try:
@@ -777,16 +800,12 @@ def build():
 
     except Exception as exc:
 
-        print()
-
         print(
             "ERROR: Could not discover "
             "repositories."
         )
 
-        print(
-            str(exc)
-        )
+        print(str(exc))
 
         sys.exit(1)
 
@@ -812,7 +831,6 @@ def build():
     )
 
     empty_playlists = []
-
     failed_playlists = []
 
     # ========================================================
@@ -858,7 +876,7 @@ def build():
         )
 
         # ====================================================
-        # PROCESS PLAYLIST FILES
+        # FILES
         # ====================================================
 
         for playlist_path in playlist_files:
@@ -909,7 +927,7 @@ def build():
                 )
 
                 # ============================================
-                # PROCESS CHANNELS
+                # CHANNELS
                 # ============================================
 
                 for entry in entries:
@@ -922,10 +940,10 @@ def build():
                     )
 
                     # ========================================
-                    # ONLY HERE is the final group generated.
+                    # IMPORTANT:
                     #
-                    # For App M3U, Buddy Live and My-Streams
-                    # the original group is completely ignored.
+                    # get_final_group() checks the special
+                    # exceptions BEFORE touching group-title.
                     # ========================================
 
                     final_group = (
@@ -967,7 +985,7 @@ def build():
         print()
 
     # ========================================================
-    # DUPLICATE REMOVAL
+    # DUPLICATE URL REMOVAL
     # ========================================================
 
     print(
@@ -1048,7 +1066,7 @@ def build():
             )
 
     # ========================================================
-    # BUILD SUMMARY
+    # SUMMARY
     # ========================================================
 
     print("=" * 70)
@@ -1090,14 +1108,8 @@ def build():
     # ========================================================
 
     print()
-
-    print(
-        "CATEGORY SUMMARY"
-    )
-
-    print(
-        "-" * 70
-    )
+    print("CATEGORY SUMMARY")
+    print("-" * 70)
 
     for category, count in sorted(
         category_counter.items(),
@@ -1113,14 +1125,8 @@ def build():
     # ========================================================
 
     print()
-
-    print(
-        "SOURCE SUMMARY"
-    )
-
-    print(
-        "-" * 70
-    )
+    print("SOURCE SUMMARY")
+    print("-" * 70)
 
     for repo_name in repositories:
 
@@ -1181,7 +1187,6 @@ def build():
             )
 
     print()
-
     print("Done.")
 
 
