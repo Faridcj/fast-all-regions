@@ -56,7 +56,7 @@ SPECIAL_GROUPS = {
 SOURCE_NAME_MAP = {
 
     "airy-playlist-generator":
-        "Airy",
+        "Airy TV",
 
     "app-m3u-generator":
         "App M3U",
@@ -77,10 +77,10 @@ SOURCE_NAME_MAP = {
         "dlxes",
 
     "lg-playlist-generator":
-        "LG",
+        "LG TV",
 
     "lg-playlist-generator2":
-        "LG",
+        "LG TV",
 
     "My-Streams":
         "My-Streams",
@@ -92,10 +92,10 @@ SOURCE_NAME_MAP = {
         "oly",
 
     "plex":
-        "Plex",
+        "Plex TV",
 
     "plex-alt-fast-channels":
-        "Plex",
+        "Plex TV",
 
     "pluto":
         "Pluto TV",
@@ -130,6 +130,78 @@ SOURCE_NAME_MAP = {
 
 
 # ============================================================
+# SOURCE DISPLAY ORDER
+#
+# Lower number = appears earlier in final M3U.
+#
+# Requested order:
+#
+#   Samsung TV Plus
+#   LG TV
+#   TCL
+#   Rakuten TV
+#   Airy TV
+#   Pluto TV
+#   Plex TV
+#   Tubi
+#   Xumo
+#
+# All other sources appear after these.
+# ============================================================
+
+SOURCE_ORDER = {
+
+    "Samsung TV Plus": 1,
+
+    "LG TV": 2,
+
+    "TCL": 3,
+
+    "Rakuten TV": 4,
+
+    "Airy TV": 5,
+
+    "Pluto TV": 6,
+
+    "Plex TV": 7,
+
+    "Tubi": 8,
+
+    "Xumo": 9,
+}
+
+
+def get_category_sort_key(category):
+
+    source = category.split(
+        " | ",
+        1
+    )[0].strip()
+
+    # --------------------------------------------------------
+    # Requested sources first
+    # --------------------------------------------------------
+
+    if source in SOURCE_ORDER:
+
+        return (
+            0,
+            SOURCE_ORDER[source],
+            category.lower()
+        )
+
+    # --------------------------------------------------------
+    # All remaining sources afterward
+    # --------------------------------------------------------
+
+    return (
+        1,
+        999,
+        category.lower()
+    )
+
+
+# ============================================================
 # LOW-PRIORITY GROUPS
 #
 # IMPORTANT:
@@ -153,14 +225,14 @@ SOURCE_NAME_MAP = {
 # -> My-Streams duplicate removed
 # -> TCL kept
 #
-# Buddy Live + Plex
+# Buddy Live + Plex TV
 # -> Buddy Live duplicate removed
-# -> Plex kept
+# -> Plex TV kept
 #
-# Plex + Samsung TV Plus
+# Plex TV + Samsung TV Plus
 # -> BOTH KEPT
 #
-# TCL + Plex
+# TCL + Plex TV
 # -> BOTH KEPT
 # ============================================================
 
@@ -440,6 +512,39 @@ def get_final_group(
     if not first_level:
 
         return source
+
+    # ========================================================
+    # RAKUTEN TV GROUP CLEANING
+    #
+    # Examples:
+    #
+    # RakutenTV🇬🇧: Crime
+    # -> Crime
+    #
+    # RakutenTV🇫🇷: Movies
+    # -> Movies
+    #
+    # RakutenTV🇩🇪: Action
+    # -> Action
+    #
+    # Country/source prefix is removed.
+    # ========================================================
+
+    if repo_name == "RakutenTV":
+
+        rakuten_match = re.match(
+            r"^RakutenTV[^:]*:\s*(.+)$",
+            first_level,
+            flags=re.IGNORECASE
+        )
+
+        if rakuten_match:
+
+            first_level = (
+                rakuten_match
+                .group(1)
+                .strip()
+            )
 
     return (
         f"{source} | "
@@ -1064,6 +1169,18 @@ def build():
         "PRIORITY-BASED"
     )
 
+    print(
+        "Source display order: "
+        "Samsung TV Plus -> LG TV -> TCL -> "
+        "Rakuten TV -> Airy TV -> Pluto TV -> "
+        "Plex TV -> Tubi -> Xumo -> Others"
+    )
+
+    print(
+        "Rakuten subgroup cleanup: "
+        "ENABLED"
+    )
+
     print()
 
     print(
@@ -1358,6 +1475,35 @@ def build():
         )
 
     # ========================================================
+    # SORT FINAL PLAYLIST
+    #
+    # Source order:
+    #
+    # Samsung TV Plus
+    # LG TV
+    # TCL
+    # Rakuten TV
+    # Airy TV
+    # Pluto TV
+    # Plex TV
+    # Tubi
+    # Xumo
+    # Others
+    #
+    # Within each category:
+    # Channel name alphabetical order.
+    # ========================================================
+
+    unique_entries.sort(
+        key=lambda entry: (
+            get_category_sort_key(
+                entry["final_group"]
+            ),
+            entry["name"].lower()
+        )
+    )
+
+    # ========================================================
     # WRITE OUTPUT
     # ========================================================
 
@@ -1448,7 +1594,9 @@ def build():
 
     for category, count in sorted(
         category_counter.items(),
-        key=lambda x: x[0].lower()
+        key=lambda x: get_category_sort_key(
+            x[0]
+        )
     ):
 
         print(
