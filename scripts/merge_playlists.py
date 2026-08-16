@@ -21,7 +21,7 @@ GITHUB_API = "https://api.github.com"
 
 USER_AGENT = (
     "Mozilla/5.0 "
-    "(compatible; FAST-All-Regions-Builder/1.0)"
+    "(compatible; FAST-All-Regions-Builder/2.0)"
 )
 
 PLAYLIST_EXTENSIONS = (
@@ -29,26 +29,45 @@ PLAYLIST_EXTENSIONS = (
     ".m3u8",
 )
 
+# ------------------------------------------------------------
+# GitHub authentication
+#
+# In GitHub Actions, set:
+#
+#   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#
+# The script will automatically use it.
+#
+# If no token exists, the script falls back to unauthenticated
+# GitHub API access.
+# ------------------------------------------------------------
+
+GITHUB_TOKEN = None
+
 
 # ============================================================
-# SPECIAL SOURCES
+# SPECIAL CATEGORY SOURCES
 #
-# EVERYTHING belonging to these sources is forced into
-# exactly ONE final category.
+# IMPORTANT:
 #
-# Original group-title is NEVER used.
-# Playlist filename is NEVER used.
-# Multiple playlist files are merged.
+# For these repositories the ORIGINAL group-title is NEVER
+# inspected.
+#
+# EVERY channel from each repository goes into exactly ONE
+# category.
+#
+# Multiple M3U files inside the same repository are merged
+# into the same category.
 # ============================================================
 
-SPECIAL_REPO_GROUPS = {
+SPECIAL_GROUPS = {
     "app-m3u-generator": "App M3U",
 
     "buddylive": "Buddy Live",
     "buddylive-combined": "Buddy Live",
     "buddylive_v2": "Buddy Live",
 
-    "my-streams": "My-Streams",
+    "My-Streams": "My-Streams",
 }
 
 
@@ -85,7 +104,7 @@ SOURCE_NAME_MAP = {
     "lg-playlist-generator2":
         "LG",
 
-    "my-streams":
+    "My-Streams":
         "My-Streams",
 
     "nz":
@@ -103,7 +122,7 @@ SOURCE_NAME_MAP = {
     "pluto":
         "Pluto TV",
 
-    "rakutentv":
+    "RakutenTV":
         "Rakuten TV",
 
     "roku-playlist-generator":
@@ -130,30 +149,6 @@ SOURCE_NAME_MAP = {
     "xumo-playlist-generator":
         "Xumo",
 }
-
-
-# ============================================================
-# SPECIAL SOURCE DETECTION
-# ============================================================
-
-def normalize_repo_name(repo_name):
-
-    return (
-        repo_name
-        .strip()
-        .lower()
-    )
-
-
-def get_special_group(repo_name):
-
-    repo_key = normalize_repo_name(
-        repo_name
-    )
-
-    return SPECIAL_REPO_GROUPS.get(
-        repo_key
-    )
 
 
 # ============================================================
@@ -193,7 +188,11 @@ def http_get(url, timeout=45, retries=3):
                 raise
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+
+                time.sleep(
+                    2 ** attempt
+                )
+
                 continue
 
             raise
@@ -206,7 +205,11 @@ def http_get(url, timeout=45, retries=3):
             last_error = exc
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+
+                time.sleep(
+                    2 ** attempt
+                )
+
                 continue
 
             raise
@@ -214,7 +217,11 @@ def http_get(url, timeout=45, retries=3):
     raise last_error
 
 
-def http_get_text(url, timeout=45, retries=3):
+def http_get_text(
+    url,
+    timeout=45,
+    retries=3
+):
 
     data = http_get(
         url,
@@ -228,6 +235,10 @@ def http_get_text(url, timeout=45, retries=3):
     )
 
 
+# ============================================================
+# GITHUB API
+# ============================================================
+
 def github_api(path, retries=3):
 
     url = GITHUB_API + path
@@ -235,7 +246,18 @@ def github_api(path, retries=3):
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
+
+    # --------------------------------------------------------
+    # USE GITHUB TOKEN WHEN AVAILABLE
+    # --------------------------------------------------------
+
+    if GITHUB_TOKEN:
+
+        headers["Authorization"] = (
+            f"Bearer {GITHUB_TOKEN}"
+        )
 
     request = urllib.request.Request(
         url,
@@ -253,6 +275,21 @@ def github_api(path, retries=3):
                 timeout=45
             ) as response:
 
+                # ------------------------------------------------
+                # Rate-limit information
+                # ------------------------------------------------
+
+                remaining = response.headers.get(
+                    "X-RateLimit-Remaining"
+                )
+
+                if remaining is not None:
+
+                    print(
+                        f"  GitHub API remaining: "
+                        f"{remaining}"
+                    )
+
                 return json.loads(
                     response.read().decode(
                         "utf-8"
@@ -263,28 +300,86 @@ def github_api(path, retries=3):
 
             last_error = exc
 
+            # ----------------------------------------------------
+            # 404
+            # ----------------------------------------------------
+
             if exc.code == 404:
+
                 raise
 
-            if exc.code == 403:
+            # ----------------------------------------------------
+            # Rate limit
+            # ----------------------------------------------------
+
+            if exc.code in (403, 429):
 
                 remaining = exc.headers.get(
                     "X-RateLimit-Remaining"
                 )
 
+                reset = exc.headers.get(
+                    "X-RateLimit-Reset"
+                )
+
+                retry_after = exc.headers.get(
+                    "Retry-After"
+                )
+
                 if remaining == "0":
 
-                    raise RuntimeError(
-                        "GitHub API rate limit exceeded"
+                    if retry_after:
+
+                        wait_seconds = int(
+                            retry_after
+                        )
+
+                    elif reset:
+
+                        wait_seconds = max(
+                            1,
+                            int(reset)
+                            - int(time.time())
+                        )
+
+                    else:
+
+                        wait_seconds = 60
+
+                    print()
+                    print(
+                        "GitHub API rate limit "
+                        "reached."
                     )
+
+                    print(
+                        f"Waiting "
+                        f"{wait_seconds} "
+                        f"seconds..."
+                    )
+
+                    time.sleep(
+                        min(
+                            wait_seconds,
+                            120
+                        )
+                    )
+
+                    continue
+
+            # ----------------------------------------------------
+            # Retry
+            # ----------------------------------------------------
 
             if attempt < retries - 1:
 
+                wait_seconds = min(
+                    10,
+                    2 ** attempt
+                )
+
                 time.sleep(
-                    min(
-                        10,
-                        2 ** attempt
-                    )
+                    wait_seconds
                 )
 
                 continue
@@ -299,7 +394,11 @@ def github_api(path, retries=3):
             last_error = exc
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+
+                time.sleep(
+                    2 ** attempt
+                )
+
                 continue
 
             raise
@@ -361,44 +460,27 @@ def get_first_level_group(group):
 
 def get_final_group(
     repo_name,
-    original_group=""
+    original_group
 ):
-    """
-    SPECIAL SOURCES ALWAYS OVERRIDE EVERYTHING.
-
-    App M3U    -> App M3U
-    Buddy Live -> Buddy Live
-    My-Streams -> My-Streams
-
-    Original group-title is ignored for special sources.
-
-    All other repositories use:
-
-        SOURCE | FIRST LEVEL ORIGINAL GROUP
-    """
 
     # ========================================================
-    # SPECIAL SOURCE OVERRIDE
+    # SPECIAL SOURCES
+    #
+    # NEVER inspect original group-title.
     # ========================================================
 
-    special_group = get_special_group(
-        repo_name
-    )
+    if repo_name in SPECIAL_GROUPS:
 
-    if special_group:
-
-        return special_group
+        return SPECIAL_GROUPS[
+            repo_name
+        ]
 
     # ========================================================
     # NORMAL SOURCES
     # ========================================================
 
-    repo_key = normalize_repo_name(
-        repo_name
-    )
-
     source = SOURCE_NAME_MAP.get(
-        repo_key,
+        repo_name,
         repo_name
     )
 
@@ -489,6 +571,7 @@ def parse_m3u(text):
             )
 
             current_attributes = attributes
+
             current_name = name
 
             waiting_for_url = True
@@ -496,7 +579,7 @@ def parse_m3u(text):
             continue
 
         # ----------------------------------------------------
-        # Other M3U directives
+        # Other directives
         # ----------------------------------------------------
 
         if line.startswith("#"):
@@ -569,11 +652,13 @@ def discover_repositories():
             name = repo.get("name")
 
             if name:
+
                 repositories.append(
                     name
                 )
 
         if len(data) < 100:
+
             break
 
         page += 1
@@ -590,6 +675,10 @@ def discover_repositories():
 
 def discover_playlist_files(repo_name):
 
+    # --------------------------------------------------------
+    # Get repository information
+    # --------------------------------------------------------
+
     repo_path = (
         f"/repos/"
         f"{urllib.parse.quote(OWNER)}"
@@ -605,6 +694,10 @@ def discover_playlist_files(repo_name):
         "main"
     )
 
+    # --------------------------------------------------------
+    # Get complete Git tree
+    # --------------------------------------------------------
+
     tree_path = (
         f"/repos/"
         f"{urllib.parse.quote(OWNER)}"
@@ -618,6 +711,17 @@ def discover_playlist_files(repo_name):
         tree_path
     )
 
+    # --------------------------------------------------------
+    # Check truncated tree
+    # --------------------------------------------------------
+
+    if tree_data.get("truncated"):
+
+        print(
+            "  WARNING: Git tree is "
+            "truncated."
+        )
+
     files = []
 
     for item in tree_data.get(
@@ -626,6 +730,7 @@ def discover_playlist_files(repo_name):
     ):
 
         if item.get("type") != "blob":
+
             continue
 
         path = item.get(
@@ -637,7 +742,9 @@ def discover_playlist_files(repo_name):
             PLAYLIST_EXTENSIONS
         ):
 
-            files.append(path)
+            files.append(
+                path
+            )
 
     return sorted(
         files,
@@ -686,28 +793,22 @@ def rebuild_extinf(
     entry,
     final_group
 ):
-    """
-    Rebuild EXTINF while preserving ALL
-    original attributes.
-
-    Only group-title is replaced.
-    """
 
     attributes = dict(
         entry["attrs"]
     )
 
-    # ========================================================
-    # FORCE FINAL GROUP
-    # ========================================================
+    # --------------------------------------------------------
+    # ONLY CHANGE group-title
+    # --------------------------------------------------------
 
     attributes["group-title"] = (
         final_group
     )
 
-    # ========================================================
-    # PREFERRED ATTRIBUTE ORDER
-    # ========================================================
+    # --------------------------------------------------------
+    # Preferred attribute order
+    # --------------------------------------------------------
 
     preferred_order = [
 
@@ -738,9 +839,9 @@ def rebuild_extinf(
                 key
             )
 
-    # ========================================================
-    # PRESERVE ALL OTHER ATTRIBUTES
-    # ========================================================
+    # --------------------------------------------------------
+    # Preserve every other attribute
+    # --------------------------------------------------------
 
     for key in attributes:
 
@@ -749,6 +850,10 @@ def rebuild_extinf(
             ordered_keys.append(
                 key
             )
+
+    # --------------------------------------------------------
+    # Build attributes
+    # --------------------------------------------------------
 
     attribute_string = " ".join(
         f'{key}="{attributes[key]}"'
@@ -767,47 +872,22 @@ def rebuild_extinf(
 
 
 # ============================================================
-# FINAL SPECIAL SOURCE ENFORCEMENT
-# ============================================================
-
-def enforce_special_categories(
-    entries
-):
-    """
-    FINAL SAFETY NET.
-
-    Regardless of what happened earlier,
-    every entry from a special repository
-    is forced into its single category.
-
-    This runs immediately before writing.
-    """
-
-    for entry in entries:
-
-        repo_name = entry.get(
-            "repo",
-            ""
-        )
-
-        special_group = get_special_group(
-            repo_name
-        )
-
-        if special_group:
-
-            entry["final_group"] = (
-                special_group
-            )
-
-    return entries
-
-
-# ============================================================
 # MAIN BUILD
 # ============================================================
 
 def build():
+
+    global GITHUB_TOKEN
+
+    # --------------------------------------------------------
+    # Load GitHub token
+    # --------------------------------------------------------
+
+    GITHUB_TOKEN = (
+        __import__("os")
+        .environ
+        .get("GITHUB_TOKEN")
+    )
 
     print("=" * 70)
     print("FAST ALL REGIONS BUILDER")
@@ -849,11 +929,6 @@ def build():
     )
 
     print(
-        "Special source grouping: "
-        "FORCED / MERGED"
-    )
-
-    print(
         "Region guessing: DISABLED"
     )
 
@@ -872,10 +947,34 @@ def build():
 
     print()
 
-    print(
-        "GitHub API authentication: "
-        "DISABLED"
-    )
+    if GITHUB_TOKEN:
+
+        print(
+            "GitHub API authentication: "
+            "ENABLED"
+        )
+
+        print(
+            "GitHub API rate-limit protection: "
+            "ENABLED"
+        )
+
+    else:
+
+        print(
+            "WARNING: GitHub API authentication "
+            "NOT AVAILABLE"
+        )
+
+        print(
+            "The builder will use unauthenticated "
+            "GitHub API access."
+        )
+
+        print(
+            "This may hit the 60 requests/hour "
+            "limit."
+        )
 
     print()
 
@@ -928,6 +1027,8 @@ def build():
 
     failed_playlists = []
 
+    failed_repositories = []
+
     # ========================================================
     # PROCESS REPOSITORIES
     # ========================================================
@@ -952,6 +1053,10 @@ def build():
                 "  [ERROR] Cannot read "
                 "repository tree: "
                 f"{exc}"
+            )
+
+            failed_repositories.append(
+                repo_name
             )
 
             print()
@@ -1028,21 +1133,17 @@ def build():
                 for entry in entries:
 
                     # ------------------------------------------------
-                    # SPECIAL SOURCES
+                    # SPECIAL SOURCE
                     #
-                    # NEVER inspect original group-title.
+                    # DO NOT READ original group-title.
                     # ------------------------------------------------
 
-                    special_group = (
-                        get_special_group(
-                            repo_name
-                        )
-                    )
-
-                    if special_group:
+                    if repo_name in SPECIAL_GROUPS:
 
                         final_group = (
-                            special_group
+                            SPECIAL_GROUPS[
+                                repo_name
+                            ]
                         )
 
                     else:
@@ -1115,7 +1216,12 @@ def build():
         )
 
         if not stream_url:
+
             continue
+
+        # ----------------------------------------------------
+        # EXACT URL MATCH
+        # ----------------------------------------------------
 
         if stream_url in seen_urls:
 
@@ -1132,16 +1238,6 @@ def build():
         )
 
     # ========================================================
-    # FINAL SPECIAL SOURCE ENFORCEMENT
-    # ========================================================
-
-    unique_entries = (
-        enforce_special_categories(
-            unique_entries
-        )
-    )
-
-    # ========================================================
     # FINAL CATEGORY COUNT
     # ========================================================
 
@@ -1156,30 +1252,28 @@ def build():
     # ========================================================
     # SAFETY CHECK
     #
-    # Special sources MUST have exactly one category each.
+    # These sources MUST NOT create subcategories.
     # ========================================================
 
-    special_expected = {
-        "App M3U",
-        "Buddy Live",
-        "My-Streams",
-    }
+    forbidden_prefixes = (
+        "App M3U |",
+        "Buddy Live |",
+        "My-Streams |",
+    )
 
     bad_special_categories = []
 
     for category in category_counter:
 
-        if (
-            category.startswith("App M3U |")
-            or
-            category.startswith("Buddy Live |")
-            or
-            category.startswith("My-Streams |")
-        ):
+        for prefix in forbidden_prefixes:
 
-            bad_special_categories.append(
-                category
-            )
+            if category.startswith(
+                prefix
+            ):
+
+                bad_special_categories.append(
+                    category
+                )
 
     if bad_special_categories:
 
@@ -1205,6 +1299,67 @@ def build():
         )
 
     # ========================================================
+    # IMPORTANT SOURCE VALIDATION
+    #
+    # Make sure Samsung TV Plus was actually processed.
+    # ========================================================
+
+    samsung_entries = 0
+
+    for entry in unique_entries:
+
+        if entry.get("repo") == (
+            "samsungtvplus"
+        ):
+
+            samsung_entries += 1
+
+    print()
+    print(
+        "SOURCE VALIDATION"
+    )
+
+    print(
+        "-" * 70
+    )
+
+    print(
+        "Samsung TV Plus entries: "
+        f"{samsung_entries}"
+    )
+
+    if samsung_entries == 0:
+
+        print(
+            "WARNING: Samsung TV Plus "
+            "has ZERO entries in this build."
+        )
+
+        print(
+            "Check the repository discovery "
+            "and playlist files above."
+        )
+
+    else:
+
+        samsung_categories = set()
+
+        for entry in unique_entries:
+
+            if entry.get("repo") == (
+                "samsungtvplus"
+            ):
+
+                samsung_categories.add(
+                    entry["final_group"]
+                )
+
+        print(
+            "Samsung TV Plus categories: "
+            f"{len(samsung_categories)}"
+        )
+
+    # ========================================================
     # WRITE OUTPUT
     # ========================================================
 
@@ -1215,9 +1370,17 @@ def build():
         newline="\n"
     ) as output:
 
+        # ----------------------------------------------------
+        # M3U HEADER
+        # ----------------------------------------------------
+
         output.write(
             "#EXTM3U\n"
         )
+
+        # ----------------------------------------------------
+        # CHANNELS
+        # ----------------------------------------------------
 
         for entry in unique_entries:
 
@@ -1238,6 +1401,7 @@ def build():
     # SUMMARY
     # ========================================================
 
+    print()
     print("=" * 70)
     print("BUILD COMPLETE")
     print("=" * 70)
@@ -1245,6 +1409,11 @@ def build():
     print(
         f"Repositories discovered: "
         f"{len(repositories)}"
+    )
+
+    print(
+        f"Repositories failed: "
+        f"{len(failed_repositories)}"
     )
 
     print(
@@ -1271,30 +1440,6 @@ def build():
         f"Output: "
         f"{OUTPUT_FILE}"
     )
-
-    # ========================================================
-    # SPECIAL SOURCE SUMMARY
-    # ========================================================
-
-    print()
-    print(
-        "SPECIAL SOURCE SUMMARY"
-    )
-
-    print(
-        "-" * 70
-    )
-
-    for category in (
-        "App M3U",
-        "Buddy Live",
-        "My-Streams",
-    ):
-
-        print(
-            f"{category}: "
-            f"{category_counter.get(category, 0)}"
-        )
 
     # ========================================================
     # CATEGORY SUMMARY
@@ -1341,6 +1486,7 @@ def build():
             continue
 
         if stats["files_found"] == 0:
+
             continue
 
         print(
@@ -1350,6 +1496,24 @@ def build():
             f"{stats['files_ok']}/"
             f"{stats['files_found']} files"
         )
+
+    # ========================================================
+    # FAILED REPOSITORIES
+    # ========================================================
+
+    if failed_repositories:
+
+        print()
+        print(
+            f"FAILED REPOSITORIES: "
+            f"{len(failed_repositories)}"
+        )
+
+        for repo_name in failed_repositories:
+
+            print(
+                f"  {repo_name}"
+            )
 
     # ========================================================
     # EMPTY PLAYLISTS
@@ -1396,4 +1560,5 @@ def build():
 # ============================================================
 
 if __name__ == "__main__":
+
     build()
