@@ -1,33 +1,163 @@
-name: EPG Audit
+name: Merge M3U + EPG
 
 on:
   workflow_dispatch:
 
 jobs:
-  audit:
+  merge:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Download EPG artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p epg_artifact
+
+          gh run download 31958511043 \
+            --repo Faridcj/fast-all-regions \
+            --dir epg_artifact
+
+          echo "=== ARTIFACT CONTENT ==="
+          find epg_artifact -type f -print
+
+      - name: Find EPG
+        run: |
+          EPG_FILE=$(find epg_artifact -type f | head -n 1)
+
+          if [ -z "$EPG_FILE" ]; then
+            echo "EPG not found"
+            exit 1
+          fi
+
+          echo "EPG_FILE=$EPG_FILE" >> "$GITHUB_ENV"
+          echo "Using: $EPG_FILE"
+
+      - name: Install Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Run EPG audit
-        run: |
-          python scripts/epg_audit.py
+      - name: Install requests
+        run: pip install requests
 
-      - name: Upload audit report
+      - name: Create merge script
+        run: |
+          cat > merge_epg.py <<'PY'
+          import os
+          import gzip
+          import re
+          import requests
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          M3U_URL = "https://raw.githubusercontent.com/Faridcj/fast-all-regions/main/fast-all-regions.m3u"
+          EPG_FILE = Path(os.environ["EPG_FILE"])
+          OUTPUT = "fast-all-regions-epg.m3u"
+
+          def normalize(text):
+              return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+          def load_epg(path):
+              data = path.read_bytes()
+
+              if data[:2] == b"\x1f\x8b":
+                  data = gzip.decompress(data)
+
+              root = ET.fromstring(data)
+              epg = {}
+
+              for channel in root.findall(".//channel"):
+                  cid = channel.get("id")
+
+                  if not cid:
+                      continue
+
+                  for name in channel.findall("display-name"):
+                      if name.text:
+                          epg[normalize(name.text)] = cid
+
+              return epg
+
+          def find_epg_id(name, epg):
+              n = normalize(name)
+
+              if n in epg:
+                  return epg[n]
+
+              for key, cid in epg.items():
+                  if n in key or key in n:
+                      return cid
+
+              return None
+
+          print("Downloading M3U...")
+
+          response = requests.get(M3U_URL, timeout=120)
+          response.raise_for_status()
+
+          lines = response.text.splitlines()
+
+          print("Loading EPG...")
+          epg = load_epg(EPG_FILE)
+
+          print("EPG channels:", len(epg))
+
+          output = []
+          total = 0
+          matched = 0
+
+          for line in lines:
+
+              if line.startswith("#EXTINF"):
+                  total += 1
+
+                  channel_name = (
+                      line.split(",", 1)[1].strip()
+                      if "," in line
+                      else ""
+                  )
+
+                  epg_id = find_epg_id(channel_name, epg)
+
+                  if epg_id:
+
+                      if 'tvg-id="' in line:
+                          line = re.sub(
+                              r'tvg-id="[^"]*"',
+                              f'tvg-id="{epg_id}"',
+                              line
+                          )
+                      else:
+                          line = line.replace(
+                              "#EXTINF:",
+                              f'#EXTINF: tvg-id="{epg_id}"',
+                              1
+                          )
+
+                      matched += 1
+
+              output.append(line)
+
+          Path(OUTPUT).write_text(
+              "\n".join(output) + "\n",
+              encoding="utf-8"
+          )
+
+          print("Total:", total)
+          print("Matched:", matched)
+          print("Unmatched:", total - matched)
+          print("Created:", OUTPUT)
+          PY
+
+      - name: Run merge
+        run: python merge_epg.py
+
+      - name: Upload result
         uses: actions/upload-artifact@v4
         with:
-          name: epg-audit-report
-          path: epg-audit.txt
+          name: merged-m3u
+          path: fast-all-regions-epg.m3u
