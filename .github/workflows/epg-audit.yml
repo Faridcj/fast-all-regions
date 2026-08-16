@@ -6,7 +6,7 @@ on:
     - cron: "30 */6 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   epg:
@@ -290,9 +290,6 @@ jobs:
 
                   value = value.strip()
 
-                  # XMLTV:
-                  # 20260816120000 +0000
-
                   match = re.match(
                       r"^(\d{14})\s*([+-]\d{4})?",
                       value
@@ -369,15 +366,9 @@ jobs:
 
           for line in m3u_text.splitlines():
 
-              if not line.startswith(
-                  "#EXTINF"
-              ):
+              if not line.startswith("#EXTINF"):
                   continue
 
-
-              # ----------------------------------------------
-              # tvg-id
-              # ----------------------------------------------
 
               match = re.search(
                   r'tvg-id="([^"]+)"',
@@ -387,21 +378,11 @@ jobs:
 
               if match:
 
-                  value = (
-                      match.group(1)
-                      .strip()
-                  )
+                  value = match.group(1).strip()
 
                   if value:
+                      wanted_ids.add(value)
 
-                      wanted_ids.add(
-                          value
-                      )
-
-
-              # ----------------------------------------------
-              # channel name
-              # ----------------------------------------------
 
               if "," in line:
 
@@ -410,15 +391,10 @@ jobs:
                       1
                   )[1].strip()
 
-                  normalized = normalize(
-                      name
-                  )
+                  normalized = normalize(name)
 
                   if normalized:
-
-                      wanted_names.add(
-                          normalized
-                      )
+                      wanted_names.add(normalized)
 
 
           print(
@@ -440,10 +416,6 @@ jobs:
               timezone.utc
           )
 
-
-          # Keep programs from 7 days ago
-          # to 14 days in the future
-
           minimum_time = (
               now -
               timedelta(days=7)
@@ -456,42 +428,25 @@ jobs:
 
 
           print("")
-          print(
-              "Keep programmes:"
-          )
-
-          print(
-              minimum_time.isoformat()
-          )
-
-          print(
-              "to"
-          )
-
-          print(
-              maximum_time.isoformat()
-          )
+          print("Keep programmes:")
+          print(minimum_time.isoformat())
+          print("to")
+          print(maximum_time.isoformat())
 
 
           # ==================================================
           # 3. Root
           # ==================================================
 
-          root = ET.Element(
-              "tv"
-          )
-
+          root = ET.Element("tv")
 
           seen_channels = set()
+          seen_programmes = set()
 
           matched_channels = 0
-
           kept_programmes = 0
-
           duplicate_programmes = 0
-
           old_programmes = 0
-
           future_programmes = 0
 
 
@@ -505,36 +460,20 @@ jobs:
 
               print("")
               print("=" * 70)
-              print(
-                  "PROCESSING:",
-                  file
-              )
+              print("PROCESSING:", file)
               print("=" * 70)
 
 
               try:
 
-                  tree = ET.parse(
-                      file
-                  )
-
-                  source_root = (
-                      tree.getroot()
-                  )
+                  tree = ET.parse(file)
+                  source_root = tree.getroot()
 
               except Exception as exc:
 
-                  print(
-                      "SKIPPED:",
-                      exc
-                  )
-
+                  print("SKIPPED:", exc)
                   continue
 
-
-              # ------------------------------------------------
-              # Find matching channels
-              # ------------------------------------------------
 
               matching_ids = set()
 
@@ -543,9 +482,7 @@ jobs:
                   ".//channel"
               ):
 
-                  cid = channel.get(
-                      "id"
-                  )
+                  cid = channel.get("id")
 
                   if not cid:
                       continue
@@ -570,58 +507,40 @@ jobs:
 
 
                   if cid in wanted_ids:
-
                       matched = True
 
 
                   if (
                       not matched
                       and
-                      set(names)
-                      &
-                      wanted_names
+                      set(names) & wanted_names
                   ):
 
                       matched = True
 
 
                   if not matched:
-
                       continue
 
 
-                  matching_ids.add(
-                      cid
-                  )
+                  matching_ids.add(cid)
 
-
-                  # --------------------------------------------
-                  # Keep only one channel definition
-                  # --------------------------------------------
 
                   if cid in seen_channels:
-
                       continue
 
 
-                  seen_channels.add(
-                      cid
-                  )
+                  seen_channels.add(cid)
 
 
                   new_channel = ET.Element(
                       "channel",
-                      {
-                          "id": cid
-                      }
+                      {"id": cid}
                   )
 
 
-                  # Only first display name
-                  display = (
-                      channel.find(
-                          "display-name"
-                      )
+                  display = channel.find(
+                      "display-name"
                   )
 
 
@@ -636,10 +555,7 @@ jobs:
                           "display-name"
                       )
 
-                      d.text = (
-                          display.text
-                          .strip()
-                      )
+                      d.text = display.text.strip()
 
 
                   root.append(
@@ -662,9 +578,7 @@ jobs:
                       "channel"
                   )
 
-
                   if cid not in matching_ids:
-
                       continue
 
 
@@ -681,37 +595,22 @@ jobs:
                       start_raw
                   )
 
-                  stop = parse_time(
-                      stop_raw
-                  )
-
 
                   if start is None:
-
                       continue
 
-
-                  # --------------------------------------------
-                  # Date filtering
-                  # --------------------------------------------
 
                   if start < minimum_time:
 
                       old_programmes += 1
-
                       continue
 
 
                   if start > maximum_time:
 
                       future_programmes += 1
-
                       continue
 
-
-                  # --------------------------------------------
-                  # Title required
-                  # --------------------------------------------
 
                   title = programme.find(
                       "title"
@@ -727,20 +626,12 @@ jobs:
                       continue
 
 
-                  title_text = (
-                      title.text
-                      .strip()
-                  )
+                  title_text = title.text.strip()
 
 
                   if not title_text:
-
                       continue
 
-
-                  # --------------------------------------------
-                  # Duplicate key
-                  # --------------------------------------------
 
                   duplicate_key = (
                       cid,
@@ -750,25 +641,9 @@ jobs:
                   )
 
 
-                  # Store globally
-                  if not hasattr(
-                      root,
-                      "_dummy"
-                  ):
-
-                      pass
-
-
-                  # We use a separate set
-                  if "seen_programmes" not in globals():
-
-                      seen_programmes = set()
-
-
                   if duplicate_key in seen_programmes:
 
                       duplicate_programmes += 1
-
                       continue
 
 
@@ -777,10 +652,6 @@ jobs:
                   )
 
 
-                  # --------------------------------------------
-                  # Minimal programme
-                  # --------------------------------------------
-
                   attrs = {
                       "channel": cid,
                       "start": start_raw
@@ -788,10 +659,7 @@ jobs:
 
 
                   if stop_raw:
-
-                      attrs[
-                          "stop"
-                      ] = stop_raw
+                      attrs["stop"] = stop_raw
 
 
                   new_programme = ET.Element(
@@ -800,16 +668,12 @@ jobs:
                   )
 
 
-                  # Only title
                   new_title = ET.SubElement(
                       new_programme,
                       "title"
                   )
 
-
-                  new_title.text = (
-                      title_text
-                  )
+                  new_title.text = title_text
 
 
                   root.append(
@@ -830,10 +694,7 @@ jobs:
           print("=" * 70)
 
 
-          tree = ET.ElementTree(
-              root
-          )
-
+          tree = ET.ElementTree(root)
 
           tree.write(
               OUTPUT,
@@ -846,9 +707,7 @@ jobs:
           # 6. GZIP
           # ==================================================
 
-          print(
-              "Creating gzip..."
-          )
+          print("Creating gzip...")
 
 
           with open(
@@ -869,19 +728,15 @@ jobs:
 
           xml_size = (
               OUTPUT.stat().st_size
-              /
-              1024
-              /
-              1024
+              / 1024
+              / 1024
           )
 
 
           gzip_size = (
               GZIP_OUTPUT.stat().st_size
-              /
-              1024
-              /
-              1024
+              / 1024
+              / 1024
           )
 
 
@@ -917,19 +772,13 @@ jobs:
 
           print(
               "XML:",
-              round(
-                  xml_size,
-                  2
-              ),
+              round(xml_size, 2),
               "MB"
           )
 
           print(
               "GZIP:",
-              round(
-                  gzip_size,
-                  2
-              ),
+              round(gzip_size, 2),
               "MB"
           )
 
@@ -951,19 +800,13 @@ jobs:
 
           file = "epg.xml"
 
-          tree = ET.parse(
-              file
-          )
+          tree = ET.parse(file)
 
           root = tree.getroot()
 
-          channels = root.findall(
-              ".//channel"
-          )
+          channels = root.findall(".//channel")
 
-          programmes = root.findall(
-              ".//programme"
-          )
+          programmes = root.findall(".//programme")
 
 
           print("")
@@ -1008,15 +851,58 @@ jobs:
               )
 
 
-          print(
-              "EPG XML VALID"
-          )
+          print("EPG XML VALID")
 
           PY
 
 
       # ==================================================
-      # 6. EPG Audit
+      # 6. Publish EPG XML
+      # ==================================================
+
+      - name: Publish EPG XML
+        run: |
+
+          mkdir -p public
+
+          cp epg.xml public/epg.xml
+
+
+          echo ""
+          echo "======================================"
+          echo "PUBLISHING EPG"
+          echo "======================================"
+
+
+          ls -lh public/epg.xml
+
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add public/epg.xml
+
+
+          if git diff --cached --quiet; then
+
+            echo "No EPG changes."
+
+          else
+
+            git commit \
+              -m "Update EPG XML"
+
+            git push
+
+          fi
+
+
+      # ==================================================
+      # 7. EPG Audit
       # ==================================================
 
       - name: Run EPG audit
@@ -1026,11 +912,12 @@ jobs:
 
 
       # ==================================================
-      # 7. Upload optimized XML
+      # 8. Upload optimized XML
       # ==================================================
 
       - name: Upload EPG XML
         uses: actions/upload-artifact@v4
+
         with:
           name: epg-xml
           path: epg.xml
@@ -1038,11 +925,12 @@ jobs:
 
 
       # ==================================================
-      # 8. Upload compressed EPG
+      # 9. Upload compressed EPG
       # ==================================================
 
       - name: Upload compressed EPG
         uses: actions/upload-artifact@v4
+
         with:
           name: epg-xml-gz
           path: epg.xml.gz
@@ -1050,11 +938,12 @@ jobs:
 
 
       # ==================================================
-      # 9. Upload audit
+      # 10. Upload audit
       # ==================================================
 
       - name: Upload EPG audit
         uses: actions/upload-artifact@v4
+
         with:
           name: epg-audit-report
           path: epg-audit.txt
