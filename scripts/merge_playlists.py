@@ -39,6 +39,11 @@ IGNORE_PARTS = {
     "examples",
 }
 
+
+# ============================================================
+# COUNTRY / REGION MAP
+# ============================================================
+
 COUNTRIES = {
     "us": "US",
     "usa": "US",
@@ -215,7 +220,7 @@ def github_json(url):
 
 
 # ============================================================
-# GITHUB DISCOVERY
+# GITHUB REPOSITORIES
 # ============================================================
 
 def get_all_repositories():
@@ -235,12 +240,14 @@ def get_all_repositories():
         )
 
         try:
+
             data = github_json(url)
 
         except Exception as error:
 
             print(
-                f"[ERROR] Cannot read repositories: {error}"
+                f"[ERROR] Cannot read repositories: "
+                f"{error}"
             )
 
             break
@@ -276,10 +283,14 @@ def get_all_repositories():
 
 def get_repository_tree(repo, branch):
 
+    # IMPORTANT:
+    # Keep "/" unescaped inside branch/path values.
+
     url = (
         f"https://api.github.com/repos/"
-        f"{OWNER}/{quote(repo)}"
-        f"/git/trees/{quote(branch)}"
+        f"{OWNER}/{quote(repo, safe='')}"
+        f"/git/trees/"
+        f"{quote(branch, safe='/')}"
         f"?recursive=1"
     )
 
@@ -290,7 +301,8 @@ def get_repository_tree(repo, branch):
         if data.get("truncated"):
 
             print(
-                f"[WARNING] Tree truncated: {repo}"
+                f"[WARNING] GitHub tree is truncated: "
+                f"{repo}"
             )
 
         return data.get(
@@ -353,9 +365,10 @@ def discover_playlists(repo, branch):
             ""
         )
 
-        if is_playlist(path):
+        if not is_playlist(path):
+            continue
 
-            result.append(path)
+        result.append(path)
 
     return sorted(result)
 
@@ -441,6 +454,12 @@ def get_attribute(extinf, attribute):
 
 def replace_group_title(extinf, group):
 
+    escaped_group = (
+        group
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+    )
+
     if re.search(
         r'group-title="[^"]*"',
         extinf,
@@ -449,7 +468,7 @@ def replace_group_title(extinf, group):
 
         return re.sub(
             r'group-title="[^"]*"',
-            lambda m: f'group-title="{group}"',
+            f'group-title="{escaped_group}"',
             extinf,
             flags=re.IGNORECASE
         )
@@ -461,7 +480,7 @@ def replace_group_title(extinf, group):
 
     return (
         extinf[:comma]
-        + f' group-title="{group}"'
+        + f' group-title="{escaped_group}"'
         + extinf[comma:]
     )
 
@@ -514,7 +533,7 @@ def normalize_country(value):
 
 
 # ============================================================
-# COUNTRY / REGION
+# COUNTRY DETECTION
 # ============================================================
 
 def detect_country(
@@ -523,9 +542,7 @@ def detect_country(
     service
 ):
 
-    # --------------------------------------------------------
     # 1. Explicit metadata
-    # --------------------------------------------------------
 
     for attr in (
         "country",
@@ -547,11 +564,9 @@ def detect_country(
         if country:
             return country
 
-    # --------------------------------------------------------
-    # 2. Filename/path
-    # --------------------------------------------------------
+    # 2. Path / filename
 
-    stem = (
+    path_stem = (
         PurePosixPath(path)
         .stem
         .lower()
@@ -559,7 +574,7 @@ def detect_country(
 
     tokens = re.split(
         r"[^a-zA-Z]+",
-        stem
+        path_stem
     )
 
     for token in tokens:
@@ -571,9 +586,7 @@ def detect_country(
         if country:
             return country
 
-    # --------------------------------------------------------
-    # 3. Original group
-    # --------------------------------------------------------
+    # 3. Existing group title
 
     original_group = get_attribute(
         extinf,
@@ -596,9 +609,7 @@ def detect_country(
             if country:
                 return country
 
-    # --------------------------------------------------------
     # 4. tvg-id
-    # --------------------------------------------------------
 
     tvgid = get_attribute(
         extinf,
@@ -619,9 +630,7 @@ def detect_country(
             if country:
                 return country
 
-    # --------------------------------------------------------
-    # 5. Known US-oriented services
-    # --------------------------------------------------------
+    # 5. Known US-oriented sources
 
     defaults = {
         "LG Channels": "US",
@@ -655,7 +664,10 @@ def extract_original_group(extinf):
 
     group = group.strip()
 
-    return group or "General"
+    if not group:
+        return "General"
+
+    return group
 
 
 # ============================================================
@@ -672,6 +684,7 @@ def parse_m3u(text):
     )
 
     entries = []
+
     current_extinf = None
 
     for line in lines:
@@ -681,7 +694,9 @@ def parse_m3u(text):
         if not line:
             continue
 
-        if line.startswith("#EXTINF:"):
+        if line.startswith(
+            "#EXTINF:"
+        ):
 
             current_extinf = line
 
@@ -738,26 +753,18 @@ def parse_previous_output():
             encoding="utf-8"
         ) as file:
 
-            return parse_m3u(
-                file.read()
-            )
+            text = file.read()
+
+        return parse_m3u(
+            text
+        )
 
     except Exception:
 
         return []
 
 
-def detect_previous_repo(extinf):
-
-    """
-    Try to recover repository information from the
-    generated group-title.
-
-    Example:
-      group-title="Plex | US | News"
-
-    This is intentionally conservative.
-    """
+def get_previous_service(extinf):
 
     group = get_attribute(
         extinf,
@@ -801,7 +808,7 @@ def main():
 
     for extinf, url in previous_entries:
 
-        service = detect_previous_repo(
+        service = get_previous_service(
             extinf
         )
 
@@ -818,10 +825,12 @@ def main():
 
     all_entries = []
 
-    failed_repositories = []
+    failed_files = []
+
+    repository_stats = {}
 
     # ========================================================
-    # EVERY PUBLIC BUDDYCHEWCHEW REPOSITORY
+    # DISCOVER ALL REPOSITORIES
     # ========================================================
 
     for repo_info in repositories:
@@ -848,25 +857,35 @@ def main():
         )
 
         if not playlist_paths:
+
+            repository_stats[
+                repo
+            ] = {
+                "files": 0,
+                "successful": 0,
+                "channels": 0,
+            }
+
             continue
 
         service = clean_service_name(
             repo
         )
 
-        repo_entries_before = len(
-            all_entries
-        )
-
         successful_files = 0
+        repo_channels = 0
 
         for path in playlist_paths:
+
+            # IMPORTANT:
+            # safe="/" prevents the path slash from
+            # becoming %2F.
 
             raw_url = (
                 "https://raw.githubusercontent.com/"
                 f"{OWNER}/"
-                f"{quote(repo)}/"
-                f"{quote(path)}"
+                f"{quote(repo, safe='')}/"
+                f"{quote(path, safe='/')}"
             )
 
             try:
@@ -885,8 +904,18 @@ def main():
                 )
 
                 successful_files += 1
+                repo_channels += len(
+                    entries
+                )
 
                 for extinf, stream_url in entries:
+
+                    stream_url = (
+                        stream_url.strip()
+                    )
+
+                    if not stream_url:
+                        continue
 
                     country = detect_country(
                         extinf,
@@ -900,14 +929,14 @@ def main():
                         )
                     )
 
-                    # IMPORTANT:
+                    # =================================================
+                    # DYNAMIC GROUP
                     #
-                    # The genre/category is NEVER hard-coded.
+                    # SERVICE | COUNTRY | ORIGINAL SOURCE GROUP
                     #
-                    # It is read directly from the source playlist.
-                    #
-                    # Therefore future changes in Buddy's
-                    # group-title are automatically reflected.
+                    # If Buddy changes the original group-title,
+                    # the next run automatically picks it up.
+                    # =================================================
 
                     final_group = (
                         f"{service} | "
@@ -925,12 +954,16 @@ def main():
                     all_entries.append(
                         {
                             "extinf": new_extinf,
-                            "url": stream_url.strip(),
+                            "url": stream_url,
                             "service": service,
                             "country": country,
-                            "original_group": original_group,
-                            "name": get_channel_name(
-                                extinf
+                            "original_group": (
+                                original_group
+                            ),
+                            "name": (
+                                get_channel_name(
+                                    extinf
+                                )
                             ),
                         }
                     )
@@ -943,19 +976,31 @@ def main():
                     f"{error}"
                 )
 
-        # ----------------------------------------------------
-        # If the whole repository failed, keep previous
-        # entries belonging to the same service.
-        # ----------------------------------------------------
+                failed_files.append(
+                    (
+                        repo,
+                        path,
+                        str(error)
+                    )
+                )
 
-        repo_entries_after = len(
-            all_entries
-        )
+        repository_stats[
+            repo
+        ] = {
+            "files": len(
+                playlist_paths
+            ),
+            "successful": successful_files,
+            "channels": repo_channels,
+        }
+
+        # ========================================================
+        # FALLBACK ONLY IF ENTIRE REPO FAILED
+        # ========================================================
 
         if (
-            successful_files == 0
-            and repo_entries_after
-            == repo_entries_before
+            len(playlist_paths) > 0
+            and successful_files == 0
         ):
 
             old_entries = (
@@ -969,7 +1014,8 @@ def main():
 
                 print(
                     f"  [FALLBACK] "
-                    f"Keeping {len(old_entries)} "
+                    f"Keeping "
+                    f"{len(old_entries)} "
                     f"previous entries for "
                     f"{service}"
                 )
@@ -988,17 +1034,13 @@ def main():
                                     "group-title"
                                 )
                             ),
-                            "name": get_channel_name(
-                                extinf
+                            "name": (
+                                get_channel_name(
+                                    extinf
+                                )
                             ),
                         }
                     )
-
-            else:
-
-                failed_repositories.append(
-                    repo
-                )
 
     # ========================================================
     # DEDUPLICATION
@@ -1006,11 +1048,13 @@ def main():
 
     print()
     print(
-        "Removing only metadata-identical duplicates..."
+        "Removing duplicate streams..."
     )
 
     seen = set()
+
     unique_entries = []
+
     duplicate_count = 0
 
     for entry in all_entries:
@@ -1043,6 +1087,7 @@ def main():
         if dedup_key in seen:
 
             duplicate_count += 1
+
             continue
 
         seen.add(
@@ -1075,7 +1120,7 @@ def main():
     )
 
     # ========================================================
-    # WRITE
+    # WRITE OUTPUT
     # ========================================================
 
     with open(
@@ -1102,7 +1147,7 @@ def main():
             )
 
     # ========================================================
-    # REPORT
+    # FINAL REPORT
     # ========================================================
 
     print()
@@ -1141,7 +1186,7 @@ def main():
     )
 
     print(
-        "Offline streams: KEPT"
+        "Offline/temporary streams: KEPT"
     )
 
     print(
@@ -1152,18 +1197,51 @@ def main():
         "Repository discovery: DYNAMIC"
     )
 
-    if failed_repositories:
+    # ========================================================
+    # SOURCE SUMMARY
+    # ========================================================
+
+    print()
+    print(
+        "SOURCE SUMMARY"
+    )
+    print(
+        "-" * 70
+    )
+
+    for repo, stats in repository_stats.items():
+
+        if stats["files"] == 0:
+            continue
+
+        print(
+            f"{repo}: "
+            f"{stats['channels']} channels "
+            f"from "
+            f"{stats['successful']}/"
+            f"{stats['files']} files"
+        )
+
+    # ========================================================
+    # FAILED FILES
+    # ========================================================
+
+    if failed_files:
 
         print()
         print(
-            "[WARNING] Repositories with no "
-            "usable playlist:"
+            f"FAILED FILES: "
+            f"{len(failed_files)}"
         )
 
-        for repo in failed_repositories:
+        for repo, path, error in failed_files:
 
             print(
-                f"  - {repo}"
+                f"  {repo}/{path}"
+            )
+
+            print(
+                f"    {error}"
             )
 
 
