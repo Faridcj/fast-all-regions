@@ -1,133 +1,140 @@
 name: Build Final M3U
 
 on:
-  workflow_dispatch:
-
   workflow_run:
     workflows:
-      - Generate Optimized EPG
+      - "Generate Optimized EPG"
     types:
       - completed
 
+  workflow_dispatch:
+
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: build-final-m3u
+  cancel-in-progress: false
 
 jobs:
-
   merge:
 
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.name == 'Generate Optimized EPG'
+      )
 
     runs-on: ubuntu-latest
 
     steps:
 
-      # ================================================
-      # Checkout
-      # ================================================
+      # ==================================================
+      # 1. Checkout latest main
+      # ==================================================
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
 
-      # ================================================
-      # Download latest EPG artifact
-      # ================================================
+      # ==================================================
+      # 2. Setup Python
+      # ==================================================
 
-      - name: Download EPG
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+
+      # ==================================================
+      # 3. Download latest EPG artifact
+      # ==================================================
+
+      - name: Download EPG artifact
+        if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
         run: |
 
-          mkdir -p epg_artifact
+          mkdir -p epg_download
+
+          gh run download \
+            "${{ github.event.workflow_run.id }}" \
+            --repo "${{ github.repository }}" \
+            --name epg-xml \
+            --dir epg_download
+
+          echo ""
+          echo "EPG files:"
+          find epg_download -type f -ls
+
+
+      # ==================================================
+      # 4. Manual run support
+      # ==================================================
+
+      - name: Find EPG
+        run: |
 
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
 
-            RUN_ID="${{ github.event.workflow_run.id }}"
+            EPG_FILE=$(find epg_download \
+              -type f \
+              -name "*.xml" \
+              | head -n 1)
 
           else
 
-            RUN_ID=$(gh run list \
-              --workflow "epg-audit.yml" \
-              --repo "${{ github.repository }}" \
-              --status success \
-              --limit 1 \
-              --json databaseId \
-              --jq '.[0].databaseId')
+            EPG_FILE="public/epg.xml"
 
           fi
 
 
-          echo "EPG RUN ID: $RUN_ID"
+          if [ -z "$EPG_FILE" ] || [ ! -f "$EPG_FILE" ]; then
 
-
-          gh run download "$RUN_ID" \
-            --repo "${{ github.repository }}" \
-            --name epg-xml-gz \
-            --dir epg_artifact
-
-
-          echo ""
-          echo "EPG ARTIFACT:"
-          find epg_artifact -type f -ls
-
-
-      # ================================================
-      # Extract EPG
-      # ================================================
-
-      - name: Extract EPG
-        run: |
-
-          GZ_FILE=$(find epg_artifact \
-            -type f \
-            -name "*.gz" \
-            | head -n 1)
-
-
-          if [ -z "$GZ_FILE" ]; then
-
-            echo "ERROR: EPG gzip not found"
+            echo "ERROR: EPG XML not found"
 
             exit 1
 
           fi
 
 
-          echo "Using:"
-          echo "$GZ_FILE"
+          echo "EPG_FILE=$EPG_FILE" >> "$GITHUB_ENV"
+
+          echo "Using EPG:"
+          echo "$EPG_FILE"
 
 
-          gzip -dc "$GZ_FILE" > epg.xml
+      # ==================================================
+      # 5. Install dependencies
+      # ==================================================
+
+      - name: Install dependencies
+        run: |
+
+          python -m pip install \
+            --upgrade pip
+
+          pip install requests
 
 
-          ls -lh epg.xml
+      # ==================================================
+      # 6. Create merge script
+      # ==================================================
 
-
-      # ================================================
-      # Setup Python
-      # ================================================
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-
-        with:
-          python-version: "3.12"
-
-
-      # ================================================
-      # Build final M3U
-      # ================================================
-
-      - name: Merge M3U + EPG
+      - name: Create merge script
         run: |
 
           cat > merge_epg.py <<'PY'
 
+          import gzip
           import re
+          import requests
           import xml.etree.ElementTree as ET
 
           from pathlib import Path
@@ -141,7 +148,7 @@ jobs:
 
 
           EPG_FILE = Path(
-              "epg.xml"
+              __import__("os").environ["EPG_FILE"]
           )
 
 
@@ -150,40 +157,151 @@ jobs:
           )
 
 
-          # ==================================================
-          # Download M3U
-          # ==================================================
+          def normalize(text):
 
-          import urllib.request
+              if not text:
+                  return ""
+
+              text = text.lower()
+
+              text = re.sub(
+                  r"[\s_\-\.]+",
+                  "",
+                  text
+              )
+
+              text = re.sub(
+                  r"[^a-z0-9]+",
+                  "",
+                  text
+              )
+
+              return text
 
 
-          print("=" * 70)
-          print("DOWNLOADING M3U")
-          print("=" * 70)
+          def load_epg(path):
+
+              print(
+                  "Loading EPG:",
+                  path
+              )
+
+              data = path.read_bytes()
 
 
-          request = urllib.request.Request(
-              M3U_URL,
-              headers={
-                  "User-Agent":
-                  "Mozilla/5.0"
-              }
-          )
+              if data[:2] == b"\x1f\x8b":
+
+                  print(
+                      "EPG is gzip compressed"
+                  )
+
+                  data = gzip.decompress(
+                      data
+                  )
 
 
-          with urllib.request.urlopen(
-              request,
-              timeout=120
-          ) as response:
-
-              m3u = response.read().decode(
-                  "utf-8",
-                  errors="ignore"
+              root = ET.fromstring(
+                  data
               )
 
 
+              epg = {}
+
+
+              for channel in root.findall(
+                  ".//channel"
+              ):
+
+                  channel_id = channel.get(
+                      "id"
+                  )
+
+                  if not channel_id:
+                      continue
+
+
+                  for name in channel.findall(
+                      "display-name"
+                  ):
+
+                      if not name.text:
+                          continue
+
+
+                      normalized = normalize(
+                          name.text
+                      )
+
+
+                      if normalized:
+
+                          epg[
+                              normalized
+                          ] = channel_id
+
+
+              return epg
+
+
+          def find_epg_id(
+              channel_name,
+              epg
+          ):
+
+              normalized_name = normalize(
+                  channel_name
+              )
+
+
+              if not normalized_name:
+                  return None
+
+
+              if normalized_name in epg:
+
+                  return epg[
+                      normalized_name
+                  ]
+
+
+              for epg_name, epg_id in epg.items():
+
+                  if (
+                      normalized_name in epg_name
+                      or
+                      epg_name in normalized_name
+                  ):
+
+                      return epg_id
+
+
+              return None
+
+
+          # ==================================================
+          # Download current M3U
+          # ==================================================
+
+          print("")
+          print("=" * 70)
+          print("DOWNLOADING CURRENT M3U")
+          print("=" * 70)
+
+
+          response = requests.get(
+              M3U_URL,
+              timeout=120
+          )
+
+
+          response.raise_for_status()
+
+
+          m3u = response.text
+
+
           print(
-              "M3U size:",
+              "M3U characters:",
               len(m3u)
           )
 
@@ -192,259 +310,89 @@ jobs:
           # Load EPG
           # ==================================================
 
-          print("")
-          print("=" * 70)
-          print("LOADING EPG")
-          print("=" * 70)
-
-
-          tree = ET.parse(
+          epg = load_epg(
               EPG_FILE
-          )
-
-
-          root = tree.getroot()
-
-
-          epg_ids = set()
-
-
-          epg_names = {}
-
-
-          for channel in root.findall(
-              ".//channel"
-          ):
-
-              cid = channel.get(
-                  "id"
-              )
-
-
-              if not cid:
-                  continue
-
-
-              epg_ids.add(
-                  cid
-              )
-
-
-              for display in channel.findall(
-                  "display-name"
-              ):
-
-                  if not display.text:
-                      continue
-
-
-                  name = re.sub(
-                      r"[^a-zA-Z0-9]+",
-                      "",
-                      display.text.lower()
-                  )
-
-
-                  if name:
-
-                      epg_names[
-                          name
-                      ] = cid
-
-
-          print(
-              "EPG IDs:",
-              len(epg_ids)
           )
 
 
           print(
               "EPG names:",
-              len(epg_names)
+              len(epg)
           )
 
 
           # ==================================================
-          # Helpers
-          # ==================================================
-
-          def normalize(text):
-
-              if not text:
-
-                  return ""
-
-              return re.sub(
-                  r"[^a-zA-Z0-9]+",
-                  "",
-                  text.lower()
-              )
-
-
-          def find_epg_id(
-              tvg_id,
-              channel_name
-          ):
-
-              # ----------------------------------------------
-              # Exact tvg-id
-              # ----------------------------------------------
-
-              if tvg_id:
-
-                  tvg_id = tvg_id.strip()
-
-
-                  if tvg_id in epg_ids:
-
-                      return tvg_id
-
-
-              # ----------------------------------------------
-              # Exact normalized name
-              # ----------------------------------------------
-
-              normalized = normalize(
-                  channel_name
-              )
-
-
-              if normalized:
-
-                  if normalized in epg_names:
-
-                      return epg_names[
-                          normalized
-                      ]
-
-
-              # ----------------------------------------------
-              # Partial name
-              # ----------------------------------------------
-
-              if normalized:
-
-                  for name, cid in epg_names.items():
-
-                      if (
-                          normalized in name
-                          or
-                          name in normalized
-                      ):
-
-                          return cid
-
-
-              return None
-
-
-          # ==================================================
-          # Process M3U
+          # Merge
           # ==================================================
 
           lines = m3u.splitlines()
 
-
           output = []
 
-
-          total = 0
-          matched = 0
+          total_channels = 0
+          matched_channels = 0
 
 
           for line in lines:
 
-
-              if not line.startswith(
+              if line.startswith(
                   "#EXTINF"
               ):
 
-                  output.append(
-                      line
-                  )
-
-                  continue
+                  total_channels += 1
 
 
-              total += 1
+                  if "," in line:
 
-
-              # ----------------------------------------------
-              # Existing tvg-id
-              # ----------------------------------------------
-
-              match = re.search(
-                  r'tvg-id="([^"]*)"',
-                  line,
-                  re.I
-              )
-
-
-              existing_tvg_id = (
-                  match.group(1).strip()
-                  if match
-                  else ""
-              )
-
-
-              # ----------------------------------------------
-              # Channel name
-              # ----------------------------------------------
-
-              if "," in line:
-
-                  channel_name = (
-                      line.split(
-                          ",",
-                          1
-                      )[1].strip()
-                  )
-
-              else:
-
-                  channel_name = ""
-
-
-              # ----------------------------------------------
-              # Find EPG
-              # ----------------------------------------------
-
-              epg_id = find_epg_id(
-                  existing_tvg_id,
-                  channel_name
-              )
-
-
-              if epg_id:
-
-                  matched += 1
-
-
-                  if match:
-
-                      line = re.sub(
-                          r'tvg-id="[^"]*"',
-                          f'tvg-id="{epg_id}"',
-                          line,
-                          count=1
+                      channel_name = (
+                          line.split(
+                              ",",
+                              1
+                          )[1].strip()
                       )
 
                   else:
 
-                      line = line.replace(
-                          "#EXTINF:",
-                          f'#EXTINF: tvg-id="{epg_id}"',
-                          1
-                      )
+                      channel_name = ""
 
 
-              output.append(
-                  line
-              )
+                  epg_id = find_epg_id(
+                      channel_name,
+                      epg
+                  )
+
+
+                  if epg_id:
+
+                      if 'tvg-id="' in line:
+
+                          line = re.sub(
+                              r'tvg-id="[^"]*"',
+                              f'tvg-id="{epg_id}"',
+                              line
+                          )
+
+                      else:
+
+                          line = line.replace(
+                              "#EXTINF:",
+                              f'#EXTINF: tvg-id="{epg_id}"',
+                              1
+                          )
+
+
+                      matched_channels += 1
+
+
+                  output.append(line)
+
+              else:
+
+                  output.append(line)
 
 
           # ==================================================
-          # Write output
+          # Write
           # ==================================================
 
           OUTPUT.write_text(
@@ -458,40 +406,36 @@ jobs:
           print("FINAL RESULT")
           print("=" * 70)
 
-
           print(
               "Total channels:",
-              total
+              total_channels
           )
-
 
           print(
               "EPG matched:",
-              matched
+              matched_channels
           )
-
 
           print(
               "EPG unmatched:",
-              total - matched
+              total_channels -
+              matched_channels
           )
 
+          if total_channels:
 
-          percentage = (
-              matched / total * 100
-              if total
-              else 0
-          )
+              match_percent = (
+                  matched_channels
+                  /
+                  total_channels
+                  *
+                  100
+              )
 
-
-          print(
-              "Match:",
-              round(
-                  percentage,
-                  2
-              ),
-              "%"
-          )
+              print(
+                  "Match:",
+                  f"{match_percent:.2f}%"
+              )
 
 
           print(
@@ -499,54 +443,24 @@ jobs:
               OUTPUT
           )
 
-
           PY
 
+
+      # ==================================================
+      # 7. Run merge
+      # ==================================================
+
+      - name: Run merge
+        run: |
 
           python merge_epg.py
 
 
-      # ================================================
-      # Validate output
-      # ================================================
+      # ==================================================
+      # 8. Publish final M3U
+      # ==================================================
 
-      - name: Validate M3U
-        run: |
-
-          test -s fast-all-regions-epg.m3u
-
-
-          echo ""
-          echo "======================================"
-          echo "M3U VALID"
-          echo "======================================"
-
-
-          wc -l fast-all-regions-epg.m3u
-
-
-          grep -c "^#EXTINF" \
-            fast-all-regions-epg.m3u
-
-
-      # ================================================
-      # Upload artifact
-      # ================================================
-
-      - name: Upload final M3U
-        uses: actions/upload-artifact@v4
-
-        with:
-          name: final-m3u
-          path: fast-all-regions-epg.m3u
-          if-no-files-found: error
-
-
-      # ================================================
-      # Publish to repository
-      # ================================================
-
-      - name: Publish M3U
+      - name: Publish final M3U
         run: |
 
           mkdir -p public
@@ -556,26 +470,56 @@ jobs:
             public/fast-all-regions-epg.m3u
 
 
+          echo ""
+          echo "======================================"
+          echo "FINAL M3U"
+          echo "======================================"
+
+
+          ls -lh \
+            fast-all-regions-epg.m3u
+
+          ls -lh \
+            public/fast-all-regions-epg.m3u
+
+
           git config user.name \
             "github-actions[bot]"
-
 
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
 
-          git add public/fast-all-regions-epg.m3u
+          git add \
+            public/fast-all-regions-epg.m3u
 
 
           if git diff --cached --quiet; then
 
-            echo "No changes."
+            echo "No final M3U changes."
 
           else
 
             git commit \
-              -m "Update merged M3U"
+              -m "Update combined EPG playlist"
 
-            git push
+            git fetch origin main
+
+            git rebase origin/main
+
+            git push origin HEAD:main
 
           fi
+
+
+      # ==================================================
+      # 9. Upload final M3U artifact
+      # ==================================================
+
+      - name: Upload final M3U
+        uses: actions/upload-artifact@v4
+
+        with:
+          name: final-m3u
+          path: fast-all-regions-epg.m3u
+          if-no-files-found: error
