@@ -21,12 +21,10 @@ USER_AGENT = (
     "(compatible; FAST-EPG-Audit/1.0)"
 )
 
-# ------------------------------------------------------------
+
+# ============================================================
 # EPG SOURCES
-#
-# These are checked independently.
-# The audit NEVER changes the M3U.
-# ------------------------------------------------------------
+# ============================================================
 
 EPG_SOURCES = {
 
@@ -36,7 +34,7 @@ EPG_SOURCES = {
         "output/samsung_tvplus.xml",
     ],
 
-    "LG": [
+    "LG TV": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/lg-playlist-generator/main/"
         "lg_channels_us.xml",
@@ -54,7 +52,7 @@ EPG_SOURCES = {
         "epg.xml",
     ],
 
-    "Airy": [
+    "Airy TV": [
         "https://raw.githubusercontent.com/"
         "BuddyChewChew/airy-playlist-generator/main/"
         "airy_channels.xml",
@@ -62,14 +60,18 @@ EPG_SOURCES = {
 
     "Pluto TV": [
         "https://raw.githubusercontent.com/"
-        "BuddyChewChew/pluto/main/"
+        "matthuisman/i.mjh.nz/refs/heads/master/"
         "PlutoTV/all.xml.gz",
+
+        "https://raw.githubusercontent.com/"
+        "matthuisman/i.mjh.nz/refs/heads/master/"
+        "PlutoTV/all.xml",
     ],
 
-    "Plex": [
+    "Plex TV": [
         "https://raw.githubusercontent.com/"
-        "BuddyChewChew/plex/main/"
-        "Plex/us.xml.gz",
+        "matthuisman/i.mjh.nz/refs/heads/master/"
+        "Plex/all.xml.gz",
     ],
 
     "Xumo": [
@@ -274,6 +276,8 @@ def audit_source(
 
         return result
 
+    errors = []
+
     for url in urls:
 
         try:
@@ -315,14 +319,20 @@ def audit_source(
                 )
 
             result["epg_url"] = url
+            result["error"] = ""
 
             return result
 
         except Exception as exc:
 
-            result["error"] = str(
-                exc
+            errors.append(
+                f"{url} -> {exc}"
             )
+
+    result["error"] = (
+        "All EPG sources failed: "
+        + " | ".join(errors)
+    )
 
     return result
 
@@ -541,8 +551,9 @@ def main():
     )
 
     print("=" * 70)
+
     print(
-        f"Audit complete."
+        "Audit complete."
     )
 
     print(
